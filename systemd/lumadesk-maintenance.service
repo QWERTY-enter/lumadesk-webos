@@ -1,0 +1,12 @@
+[Unit]
+Description=LumaDesk workspace maintenance
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lumadesk/bin/maintenance.sh
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/home/webos/.local/share/Trash /tmp
+PrivateDevices=yes
+ProtectHome=read-only

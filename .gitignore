@@ -1,0 +1,9 @@
+.env
+*.log
+__pycache__/
+.pytest_cache/
+.DS_Store
+app/node_modules/
+.demo-home/
+.demo-state/
+*-preview.png

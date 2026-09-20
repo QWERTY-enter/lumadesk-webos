@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080b14">
+  <meta name="description" content="LumaDesk — a real Linux workspace in your browser">
+  <title>LumaDesk OS</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="boot" class="boot-screen" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="boot-word">LumaDesk</div>
+    <div class="boot-line"><i></i></div>
+  </div>
+
+  <main id="login" class="login-screen hidden" aria-label="Sign in">
+    <div class="login-ambient ambient-one"></div>
+    <div class="login-ambient ambient-two"></div>
+    <section class="login-card">
+      <div class="brand-lockup">
+        <div class="brand-symbol" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div><strong>LumaDesk</strong><small>Container workspace</small></div>
+      </div>
+      <div class="login-copy">
+        <div class="eyebrow"><span class="live-dot"></span> Secure session</div>
+        <h1>Your Linux workspace,<br>wherever you are.</h1>
+        <p>Sign in to open the private desktop on <span id="login-host">this host</span>.</p>
+      </div>
+      <form id="login-form" autocomplete="on">
+        <label for="password">Workspace password</label>
+        <div class="password-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2m-9 0h8a2 2 0 0 1 2 2v7H6v-7a2 2 0 0 1 2-2Z"/></svg>
+          <input id="password" name="password" type="password" minlength="12" required autocomplete="current-password" placeholder="Enter password">
+          <button id="toggle-password" type="button" aria-label="Show password">Show</button>
+        </div>
+        <div id="login-error" class="form-error" role="alert"></div>
+        <button class="login-button" type="submit"><span>Open workspace</span><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+      </form>
+      <footer><span><svg viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6l-8-3Z"/></svg>TLS-ready</span><span>Powered by Linux + systemd</span></footer>
+    </section>
+  </main>
+
+  <main id="desktop" class="desktop hidden" aria-label="LumaDesk desktop">
+    <div class="wallpaper" aria-hidden="true">
+      <div class="aurora aurora-a"></div><div class="aurora aurora-b"></div><div class="aurora aurora-c"></div>
+      <div class="noise"></div><div class="horizon"></div>
+    </div>
+
+    <header class="topbar">
+      <button id="system-menu-button" class="topbar-brand" aria-label="Open system menu">
+        <span class="mini-symbol"><i></i><i></i><i></i></span><strong>LumaDesk</strong>
+      </button>
+      <div class="workspace-pill"><span class="workspace-dot active"></span><span class="workspace-dot"></span><span class="workspace-dot"></span></div>
+      <div class="topbar-center" id="active-app-title">Desktop</div>
+      <div class="topbar-status">
+        <button id="quick-status" class="status-button" aria-label="Open quick settings">
+          <span id="net-icon" class="status-icon"><svg viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 20h.01"/></svg></span>
+          <span class="status-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M8 7l4-4 4 4M8 17l4 4 4-4"/></svg></span>
+          <time id="clock">00:00</time>
+        </button>
+      </div>
+    </header>
+
+    <section id="desktop-icons" class="desktop-icons" aria-label="Applications">
+      <button class="desktop-icon" data-app="welcome"><span class="app-icon icon-welcome"></span><span>Welcome</span></button>
+      <button class="desktop-icon" data-app="files"><span class="app-icon icon-files"></span><span>Files</span></button>
+      <button class="desktop-icon" data-app="terminal"><span class="app-icon icon-terminal"></span><span>Terminal</span></button>
+      <button class="desktop-icon" data-app="services"><span class="app-icon icon-services"></span><span>Services</span></button>
+    </section>
+
+    <section id="window-layer" class="window-layer" aria-live="polite"></section>
+
+    <aside id="launcher" class="launcher panel hidden" aria-label="Application launcher">
+      <div class="launcher-search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        <input id="launcher-search" placeholder="Search apps and actions" autocomplete="off">
+        <kbd>Esc</kbd>
+      </div>
+      <div id="launcher-grid" class="launcher-grid"></div>
+      <div class="launcher-footer"><span id="launcher-user">webos</span><button id="launcher-logout">Sign out</button></div>
+    </aside>
+
+    <aside id="system-menu" class="system-menu panel hidden">
+      <div class="menu-user"><div class="avatar">W</div><div><strong id="menu-user">webos</strong><small id="menu-host">container</small></div><span class="online-badge">Online</span></div>
+      <div class="menu-actions">
+        <button data-app="settings"><span>⚙</span>Settings</button>
+        <button id="menu-lock"><span>⌾</span>Lock</button>
+        <button id="menu-logout"><span>↪</span>Sign out</button>
+      </div>
+    </aside>
+
+    <aside id="quick-panel" class="quick-panel panel hidden">
+      <div class="quick-time"><strong id="quick-clock">00:00</strong><span id="quick-date">Monday, 1 January</span></div>
+      <div class="quick-grid">
+        <button class="quick-toggle active"><span><svg viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 20h.01"/></svg></span><div><strong>Network</strong><small>Connected</small></div></button>
+        <button id="focus-toggle" class="quick-toggle"><span><svg viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/></svg></span><div><strong>Focus</strong><small>Off</small></div></button>
+      </div>
+      <div class="resource-mini"><div><span>CPU</span><strong id="quick-cpu">—</strong></div><div class="mini-track"><i id="quick-cpu-bar"></i></div><div><span>Memory</span><strong id="quick-memory">—</strong></div><div class="mini-track"><i id="quick-memory-bar"></i></div></div>
+    </aside>
+
+    <div id="notifications" class="notifications" aria-live="polite"></div>
+
+    <nav class="dock-wrap" aria-label="Dock">
+      <div id="dock" class="dock">
+        <button class="dock-button launcher-button" data-command="launcher" aria-label="Applications"><span class="dock-launch-mark"><i></i><i></i><i></i><i></i></span></button>
+        <span class="dock-divider"></span>
+        <button class="dock-button" data-app="files" aria-label="Files"><span class="app-icon icon-files"></span><i class="running-dot"></i></button>
+        <button class="dock-button" data-app="terminal" aria-label="Terminal"><span class="app-icon icon-terminal"></span><i class="running-dot"></i></button>
+        <button class="dock-button" data-app="services" aria-label="Services"><span class="app-icon icon-services"></span><i class="running-dot"></i></button>
+        <button class="dock-button" data-app="system" aria-label="System Monitor"><span class="app-icon icon-system"></span><i class="running-dot"></i></button>
+        <span class="dock-divider"></span>
+        <button class="dock-button" data-app="settings" aria-label="Settings"><span class="app-icon icon-settings"></span><i class="running-dot"></i></button>
+      </div>
+    </nav>
+  </main>
+
+  <template id="window-template">
+    <article class="app-window">
+      <header class="window-titlebar">
+        <div class="traffic-lights"><button class="close" aria-label="Close"></button><button class="minimize" aria-label="Minimize"></button><button class="maximize" aria-label="Maximize"></button></div>
+        <div class="window-title"><span class="window-app-icon"></span><strong></strong></div>
+        <div class="window-title-actions"></div>
+      </header>
+      <div class="window-content"></div>
+      <div class="resize-handle" aria-hidden="true"></div>
+    </article>
+  </template>
+
+  <input id="upload-input" type="file" multiple hidden>
+  <script src="/static/vendor/xterm.js"></script>
+  <script src="/static/vendor/addon-fit.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

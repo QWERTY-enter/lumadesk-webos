@@ -1,0 +1,11 @@
+.git
+.env
+*.log
+__pycache__
+.pytest_cache
+app/node_modules
+.demo-home
+.demo-state
+*-preview.png
+*.zip
+README.assets

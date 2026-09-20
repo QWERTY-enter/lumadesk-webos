@@ -1,0 +1,73 @@
+name: lumadesk
+
+services:
+  webos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${WEBOS_IMAGE:-ghcr.io/qwerty-enter/lumadesk-webos:latest}
+    hostname: lumadesk
+    privileged: true
+    cgroup: host
+    environment:
+      container: docker
+      TZ: ${TZ:-UTC}
+      WEBOS_HOST: 0.0.0.0
+      WEBOS_PORT: 8080
+      WEBOS_HOME: /home/webos
+      WEBOS_STATE: /var/lib/lumadesk
+      WEBOS_USER: webos
+      WEBOS_PASSWORD: ${WEBOS_PASSWORD:?Run ./scripts/setup.sh before starting LumaDesk}
+      WEBOS_SECRET: ${WEBOS_SECRET:?Run ./scripts/setup.sh before starting LumaDesk}
+      WEBOS_SECURE_COOKIE: ${WEBOS_SECURE_COOKIE:-auto}
+      WEBOS_SESSION_SECONDS: ${WEBOS_SESSION_SECONDS:-28800}
+    ports:
+      - "${WEBOS_BIND:-127.0.0.1}:${WEBOS_PORT:-8080}:8080"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - lumadesk-home:/home/webos
+      - lumadesk-state:/var/lib/lumadesk
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp:mode=1777
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 20s
+      timeout: 4s
+      start_period: 25s
+      retries: 4
+    networks:
+      - lumadesk
+
+  gateway:
+    image: caddy:2-alpine
+    profiles: ["public"]
+    depends_on:
+      webos:
+        condition: service_healthy
+    environment:
+      WEBOS_DOMAIN: ${WEBOS_DOMAIN:?Set WEBOS_DOMAIN to use the public profile}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    networks:
+      - lumadesk
+
+networks:
+  lumadesk:
+    driver: bridge
+
+volumes:
+  lumadesk-home:
+  lumadesk-state:
+  caddy-data:
+  caddy-config:

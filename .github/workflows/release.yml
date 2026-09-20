@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example v1.0.0)"
+        required: true
+        default: "v1.0.0"
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish image and GitHub release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: vars
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${REQUESTED_VERSION}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          [[ "$tag" == v* ]] || tag="v${tag}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push linux/amd64 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.version }}
+            ${{ steps.vars.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.title=LumaDesk OS
+            org.opencontainers.image.description=Browser-based Debian workspace with systemd as PID 1
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=lumadesk-amd64
+          cache-to: type=gha,mode=max,scope=lumadesk-amd64
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.vars.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create release archives and checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+          IMAGE: ${{ steps.vars.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          git archive --format=tar.gz --prefix="lumadesk-webos-${VERSION}/" \
+            --output="release/lumadesk-webos-${VERSION}.tar.gz" HEAD
+          git archive --format=zip --prefix="lumadesk-webos-${VERSION}/" \
+            --output="release/lumadesk-webos-${VERSION}.zip" HEAD
+          (
+            cd release
+            sha256sum "lumadesk-webos-${VERSION}.tar.gz" "lumadesk-webos-${VERSION}.zip" > SHA256SUMS
+          )
+          cat > release/RELEASE_NOTES.md <<EOF
+          ## LumaDesk OS ${VERSION}
+
+          ### Docker image
+
+          \`\`\`bash
+          docker pull ${IMAGE}:${VERSION}
+          \`\`\`
+
+          Immutable digest:
+
+          \`\`\`text
+          ${IMAGE}@${DIGEST}
+          \`\`\`
+
+          Platform: \`linux/amd64\`  
+          The image includes SBOM and build-provenance attestations.
+
+          See the README for the required privileged/cgroup Compose configuration and security guidance.
+          EOF
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: LumaDesk OS ${{ steps.vars.outputs.version }}
+          body_path: release/RELEASE_NOTES.md
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            release/lumadesk-webos-${{ steps.vars.outputs.version }}.tar.gz
+            release/lumadesk-webos-${{ steps.vars.outputs.version }}.zip
+            release/SHA256SUMS

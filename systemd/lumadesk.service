@@ -1,0 +1,31 @@
+[Unit]
+Description=LumaDesk browser workspace
+Documentation=https://localhost/
+Wants=network-online.target
+After=network-online.target dbus.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/lumadesk
+ExecStart=/usr/bin/python3 /opt/lumadesk/server.py
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=12s
+KillMode=mixed
+UMask=0027
+Environment=PYTHONUNBUFFERED=1
+Environment=WEBOS_CONFIG=/run/lumadesk-bootstrap.json
+PassEnvironment=WEBOS_HOST WEBOS_PORT WEBOS_HOME WEBOS_STATE WEBOS_USER WEBOS_SECURE_COOKIE WEBOS_SESSION_SECONDS WEBOS_LOG_LEVEL WEBOS_DEMO
+RuntimeDirectory=lumadesk
+StateDirectory=lumadesk
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
