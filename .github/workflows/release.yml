@@ -132,7 +132,7 @@ jobs:
           Platform: \`linux/amd64\`  
           The image includes SBOM and build-provenance attestations.
 
-          See the README for the required privileged/cgroup Compose configuration and security guidance.
+          See the README for Railway compatibility mode, full-systemd Docker Compose requirements, and security guidance.
           EOF
 
       - name: Publish GitHub release
