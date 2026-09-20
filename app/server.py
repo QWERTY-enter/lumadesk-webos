@@ -53,7 +53,21 @@ SECRET_TEXT = os.environ.get("WEBOS_SECRET", BOOT_CONFIG.get("secret", ""))
 COOKIE_NAME = "lumadesk_session"
 SESSION_SECONDS = int(os.environ.get("WEBOS_SESSION_SECONDS", "28800"))
 DEMO_MODE = os.environ.get("WEBOS_DEMO", "false").lower() in {"1", "true", "yes"}
-PORT = int(os.environ.get("WEBOS_PORT", "8080"))
+MIN_PASSWORD_LENGTH = 8
+
+
+def _configured_port() -> int:
+    raw = os.environ.get("WEBOS_PORT") or os.environ.get("PORT") or "8080"
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid HTTP port: {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"HTTP port must be between 1 and 65535, got {port}")
+    return port
+
+
+PORT = _configured_port()
 HOST = os.environ.get("WEBOS_HOST", "0.0.0.0")
 MAX_TEXT_FILE = 2 * 1024 * 1024
 MAX_UPLOAD = 25 * 1024 * 1024
@@ -75,22 +89,66 @@ LOG = logging.getLogger("lumadesk")
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
 
 
+def _runtime_mode() -> str:
+    requested = os.environ.get("WEBOS_RUNTIME", "auto").lower()
+    if requested in {"railway", "standalone"}:
+        return requested
+    try:
+        return "systemd" if Path("/proc/1/comm").read_text().strip() == "systemd" else "standalone"
+    except OSError:
+        return "standalone"
+
+
+def _persistent_session_secret() -> str:
+    """Load or atomically create a signing secret in the application state dir."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    secret_path = STATE_DIR / "session-secret"
+    lock_path = STATE_DIR / ".session-secret.lock"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = secret_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing = ""
+        if len(existing) >= 32:
+            return existing
+        generated = secrets.token_hex(32)
+        temporary = secret_path.with_name(f".{secret_path.name}.{os.getpid()}.tmp")
+        temporary.write_text(generated, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(secret_path)
+        return generated
+
+
 def _validate_config() -> bytes:
     global SECRET_TEXT
-    if DEMO_MODE:
-        if not PASSWORD:
-            # Demo mode is only intended for a private development preview.
-            globals()["PASSWORD"] = "preview-access-2026"
-        if not SECRET_TEXT:
-            SECRET_TEXT = secrets.token_hex(32)
-            LOG.warning("WEBOS_SECRET was not provided; using an ephemeral demo secret")
-    if len(PASSWORD) < 12:
-        raise SystemExit("WEBOS_PASSWORD must contain at least 12 characters")
+    if DEMO_MODE and not PASSWORD:
+        # Demo mode is only intended for a private development preview.
+        globals()["PASSWORD"] = "preview-access-2026"
+    if len(PASSWORD) < MIN_PASSWORD_LENGTH:
+        raise SystemExit(f"WEBOS_PASSWORD must contain at least {MIN_PASSWORD_LENGTH} characters")
     if len(SECRET_TEXT) < 32:
-        raise SystemExit("WEBOS_SECRET must contain at least 32 characters")
+        if DEMO_MODE:
+            SECRET_TEXT = secrets.token_hex(32)
+            LOG.warning("WEBOS_SECRET is unset; using an ephemeral demo secret")
+        else:
+            try:
+                SECRET_TEXT = _persistent_session_secret()
+                LOG.warning(
+                    "WEBOS_SECRET is unset or too short; using an auto-generated secret from %s",
+                    STATE_DIR / "session-secret",
+                )
+            except OSError as exc:
+                SECRET_TEXT = secrets.token_hex(32)
+                LOG.warning(
+                    "Could not persist an automatic WEBOS_SECRET (%s); sessions will reset when this instance restarts",
+                    exc,
+                )
     return SECRET_TEXT.encode("utf-8")
 
 
+RUNTIME_MODE = _runtime_mode()
 SECRET = _validate_config()
 
 
@@ -217,7 +275,14 @@ async def manifest(_: web.Request) -> web.FileResponse:
 
 
 async def health(_: web.Request) -> web.Response:
-    return json_response({"ok": True, "service": "lumadesk", "time": datetime.now(timezone.utc).isoformat()})
+    return json_response(
+        {
+            "ok": True,
+            "service": "lumadesk",
+            "runtime": RUNTIME_MODE,
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 async def login(request: web.Request) -> web.Response:
@@ -264,6 +329,7 @@ async def session_info(request: web.Request) -> web.Response:
             "expires": session["exp"],
             "host": socket.gethostname(),
             "demo": DEMO_MODE,
+            "runtime": RUNTIME_MODE,
         }
     )
 
@@ -531,6 +597,15 @@ async def run_command(*args: str, timeout: float = 12) -> tuple[int, str, str]:
 
 
 async def service_list(_: web.Request) -> web.Response:
+    if RUNTIME_MODE != "systemd":
+        return json_response(
+            {
+                "ok": True,
+                "available": False,
+                "services": [],
+                "message": "Service control requires systemd mode; this deployment is running in platform compatibility mode.",
+            }
+        )
     if not shutil.which("systemctl"):
         return json_response({"ok": True, "available": False, "services": [], "message": "systemd is unavailable"})
     code, output, error = await run_command(
@@ -569,6 +644,8 @@ async def service_list(_: web.Request) -> web.Response:
 
 
 async def service_action(request: web.Request) -> web.Response:
+    if RUNTIME_MODE != "systemd":
+        raise web.HTTPConflict(reason="Service control is unavailable in platform compatibility mode")
     unit = request.match_info["unit"]
     action = request.match_info["action"]
     if not UNIT_RE.fullmatch(unit) or action not in {"start", "stop", "restart", "enable", "disable"}:
@@ -582,6 +659,8 @@ async def service_action(request: web.Request) -> web.Response:
 
 
 async def service_logs(request: web.Request) -> web.Response:
+    if RUNTIME_MODE != "systemd":
+        raise web.HTTPConflict(reason="Service journals are unavailable in platform compatibility mode")
     unit = request.match_info["unit"]
     if not UNIT_RE.fullmatch(unit):
         raise web.HTTPBadRequest(reason="Invalid service name")
@@ -840,5 +919,12 @@ def create_app() -> web.Application:
 
 
 if __name__ == "__main__":
-    LOG.info("Starting LumaDesk on %s:%s (home=%s, demo=%s)", HOST, PORT, HOME_ROOT, DEMO_MODE)
+    LOG.info(
+        "Starting LumaDesk on %s:%s (home=%s, runtime=%s, demo=%s)",
+        HOST,
+        PORT,
+        HOME_ROOT,
+        RUNTIME_MODE,
+        DEMO_MODE,
+    )
     web.run_app(create_app(), host=HOST, port=PORT, access_log=LOG)

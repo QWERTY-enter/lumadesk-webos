@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version (for example v1.0.0)"
         required: true
-        default: "v1.0.0"
+        default: "v1.0.1"
         type: string
 
 permissions:
@@ -79,7 +79,7 @@ jobs:
             ${{ steps.vars.outputs.image }}:latest
           labels: |
             org.opencontainers.image.title=LumaDesk OS
-            org.opencontainers.image.description=Browser-based Debian workspace with systemd as PID 1
+            org.opencontainers.image.description=Browser-based Debian workspace with systemd and Railway compatibility modes
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.vars.outputs.version }}

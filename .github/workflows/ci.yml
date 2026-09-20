@@ -34,10 +34,11 @@ jobs:
           python3 -m py_compile app/server.py
           node --check app/static/app.js
 
-      - name: Check shell scripts
+      - name: Check shell scripts and entrypoint behavior
         run: |
-          bash -n scripts/setup.sh scripts/maintenance.sh
-          sh -n scripts/entrypoint.sh
+          bash -n scripts/setup.sh scripts/maintenance.sh tests/test_entrypoint.sh
+          sh -n scripts/entrypoint.sh scripts/healthcheck.sh
+          bash tests/test_entrypoint.sh
 
   image:
     name: Build linux/amd64 image
@@ -56,6 +57,47 @@ jobs:
           context: .
           platforms: linux/amd64
           push: false
-          load: false
+          load: true
+          tags: lumadesk:test
           cache-from: type=gha,scope=lumadesk-amd64
           cache-to: type=gha,mode=max,scope=lumadesk-amd64
+
+      - name: Smoke-test Railway compatibility mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker logs lumadesk-railway-smoke 2>/dev/null || true
+            docker rm -f lumadesk-railway-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name lumadesk-railway-smoke \
+            --env RAILWAY_PROJECT_ID=ci-smoke-test \
+            --env PORT=18080 \
+            --env 'WEBOS_PASSWORD=Railway7$' \
+            --publish 18080:18080 \
+            lumadesk:test
+          for _ in {1..40}; do
+            if curl --fail --silent http://127.0.0.1:18080/healthz > /tmp/health.json; then
+              break
+            fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import json
+          health = json.load(open('/tmp/health.json', encoding='utf-8'))
+          assert health['ok'] is True
+          assert health['runtime'] == 'railway'
+          PY
+          test "$(docker exec lumadesk-railway-smoke cat /proc/1/comm)" != systemd
+          test "$(docker exec lumadesk-railway-smoke sh -c 'wc -c < /var/lib/lumadesk/session-secret')" -ge 32
+          curl --fail --silent \
+            --header 'Content-Type: application/json' \
+            --data '{"password":"Railway7$"}' \
+            http://127.0.0.1:18080/api/login > /tmp/login.json
+          python3 - <<'PY'
+          import json
+          result = json.load(open('/tmp/login.json', encoding='utf-8'))
+          assert result['ok'] is True
+          assert result['user'] == 'webos'
+          PY

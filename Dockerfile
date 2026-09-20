@@ -1,10 +1,10 @@
 FROM debian:13-slim
 
 LABEL org.opencontainers.image.title="LumaDesk OS" \
-      org.opencontainers.image.description="Browser-based Debian workspace with systemd as PID 1" \
+      org.opencontainers.image.description="Browser-based Debian workspace with systemd and Railway compatibility modes" \
       org.opencontainers.image.source="https://github.com/QWERTY-enter/lumadesk-webos" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.0.0"
+      org.opencontainers.image.version="1.0.1"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV container=docker \
@@ -33,10 +33,12 @@ COPY --chown=root:root systemd/lumadesk.service /etc/systemd/system/lumadesk.ser
 COPY --chown=root:root systemd/lumadesk-maintenance.service /etc/systemd/system/lumadesk-maintenance.service
 COPY --chown=root:root systemd/lumadesk-maintenance.timer /etc/systemd/system/lumadesk-maintenance.timer
 COPY --chown=root:root scripts/maintenance.sh /opt/lumadesk/bin/maintenance.sh
+COPY --chown=root:root scripts/healthcheck.sh /opt/lumadesk/bin/healthcheck.sh
 COPY --chown=root:root scripts/entrypoint.sh /usr/local/sbin/lumadesk-entrypoint
 COPY --chown=webos:webos seed/ /home/webos/
 
-RUN chmod 0755 /opt/lumadesk/server.py /opt/lumadesk/bin/maintenance.sh /usr/local/sbin/lumadesk-entrypoint \
+RUN chmod 0755 /opt/lumadesk/server.py /opt/lumadesk/bin/maintenance.sh \
+        /opt/lumadesk/bin/healthcheck.sh /usr/local/sbin/lumadesk-entrypoint \
     && systemctl enable lumadesk.service lumadesk-maintenance.timer \
     && systemctl set-default multi-user.target \
     && systemctl mask dev-hugepages.mount sys-fs-fuse-connections.mount systemd-remount-fs.service \
@@ -46,7 +48,7 @@ RUN chmod 0755 /opt/lumadesk/server.py /opt/lumadesk/bin/maintenance.sh /usr/loc
 EXPOSE 8080
 STOPSIGNAL SIGRTMIN+3
 HEALTHCHECK --interval=20s --timeout=4s --start-period=25s --retries=4 \
-  CMD curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null || exit 1
+  CMD ["/opt/lumadesk/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/sbin/lumadesk-entrypoint"]
 CMD ["/sbin/init"]

@@ -31,6 +31,22 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(server.parse_session(changed))
 
 
+class SecretPersistenceTests(unittest.TestCase):
+    def test_automatic_secret_is_strong_and_reused(self):
+        original = server.STATE_DIR
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                server.STATE_DIR = Path(temporary)
+                first = server._persistent_session_secret()
+                second = server._persistent_session_secret()
+                self.assertEqual(first, second)
+                self.assertGreaterEqual(len(first), 32)
+                mode = (Path(temporary) / "session-secret").stat().st_mode & 0o777
+                self.assertEqual(mode, 0o600)
+        finally:
+            server.STATE_DIR = original
+
+
 class WorkspacePathTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

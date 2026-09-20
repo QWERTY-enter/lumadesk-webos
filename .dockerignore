@@ -6,6 +6,7 @@ __pycache__
 app/node_modules
 .demo-home
 .demo-state
+.railway-test
 *-preview.png
 *.zip
 README.assets

@@ -36,8 +36,8 @@ random_hex() {
 
 password="${WEBOS_PASSWORD:-$(random_hex 14)}"
 secret="$(random_hex 32)"
-if ((${#password} < 12)); then
-  echo "WEBOS_PASSWORD must contain at least 12 characters." >&2
+if ((${#password} < 8)); then
+  echo "WEBOS_PASSWORD must contain at least 8 characters." >&2
   exit 1
 fi
 
@@ -55,7 +55,7 @@ if [[ -n "$domain" ]]; then profiles="public"; fi
 cat > .env <<EOF
 WEBOS_PASSWORD='$password'
 WEBOS_SECRET='$secret'
-WEBOS_IMAGE=ghcr.io/qwerty-enter/lumadesk-webos:1.0.0
+WEBOS_IMAGE=ghcr.io/qwerty-enter/lumadesk-webos:1.0.1
 WEBOS_BIND=127.0.0.1
 WEBOS_PORT=8080
 WEBOS_DOMAIN=${domain:-os.example.com}

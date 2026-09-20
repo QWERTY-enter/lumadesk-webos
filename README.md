@@ -7,7 +7,7 @@ A Docker-hosted Linux workspace with a custom browser desktop, a real PTY shell,
 
 **Debian 13 · systemd · Docker · linux/amd64 · MIT licensed**
 
-Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.0.0`
+Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1`
 
 > LumaDesk is a real Debian userspace, but it is still a container. It shares the Linux host kernel. If you need a separately booted kernel, kernel modules, or stronger tenant isolation, use a VM rather than Docker.
 
@@ -53,6 +53,31 @@ The backend starts as root so it can query/control systemd and then explicitly d
 
 Docker Desktop can run many parts of the project, but systemd/cgroup behavior varies. Native Linux Docker Engine is the supported target.
 
+## Railway deployment (compatibility mode)
+
+Railway does not expose privileged containers or writable cgroups, so it cannot run the full systemd PID 1 mode. LumaDesk detects Railway automatically and starts a compatibility runtime instead. The browser desktop, PTY terminal, files, editor, uploads, downloads, process list, and live metrics work; the **Services** app and systemd maintenance timer are disabled.
+
+1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1` as a Railway service.
+2. Add this service variable in the Railway dashboard:
+
+```dotenv
+WEBOS_PASSWORD=replace-with-a-unique-password
+```
+
+`WEBOS_SECRET` is no longer required. If it is missing or shorter than 32 characters, LumaDesk securely generates one. Railway injects `PORT` automatically, and LumaDesk now listens on it.
+
+3. Configure the Railway health-check path as `/healthz`, then generate a public domain.
+4. Optional but recommended: attach a Railway Volume at `/data` and add:
+
+```dotenv
+WEBOS_HOME=/data/home
+WEBOS_STATE=/data/state
+```
+
+This preserves files and the generated session secret across redeployments. Without a volume, workspace files and active sessions are ephemeral. If setting a password containing `$` through a shell rather than the Railway UI, wrap it in single quotes, for example: `WEBOS_PASSWORD='Example47$'`.
+
+To force compatibility mode on another restricted platform, set `WEBOS_RUNTIME=standalone`. Use Docker Compose on a Linux VPS when full systemd service control is required.
+
 ## Quick start with the released image
 
 ```bash
@@ -65,7 +90,7 @@ docker compose pull webos
 docker compose up -d --no-build
 ```
 
-This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.0.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
+This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
 
 To build locally from the checked-out source instead:
 
@@ -119,7 +144,7 @@ To choose your own password:
 WEBOS_PASSWORD='a-long-unique-password' ./scripts/setup.sh --force
 ```
 
-Use at least 12 characters. Do not commit `.env`; it is ignored by Git and excluded from Docker builds.
+Passwords must contain at least 8 characters; 12 or more is strongly recommended. `WEBOS_SECRET` is optional and is generated automatically when omitted or too short. Do not commit `.env`; it is ignored by Git and excluded from Docker builds.
 
 ## Managing the real init system
 
