@@ -39,6 +39,16 @@ const SYSTEM = {
   }
 };
 
+const STORE = {
+  ok: true, count: 3, installed: 1, package_install_supported: false,
+  package_install_message: 'Package installation needs the privileged runtime; this process is not running as root.',
+  apps: [
+    {id: 'htop', name: 'htop', tagline: 'Interactive process viewer', category: 'System', icon: 'S', type: 'package', packages: ['htop'], launch: {label: 'htop', command: 'htop'}, url: null, installed: false, installable: false},
+    {id: 'python-repl', name: 'Python REPL', tagline: 'Interactive Python prompt', category: 'Shortcuts', icon: 'P', type: 'shortcut', packages: [], launch: {label: 'Python REPL', command: 'python3'}, url: null, installed: true, installable: true},
+    {id: 'debian-packages', name: 'Debian packages', tagline: 'Search the Debian archive', category: 'Links', icon: 'D', type: 'link', packages: [], launch: null, url: 'https://packages.debian.org/', installed: false, installable: true}
+  ]
+};
+
 const calls = [];
 const respond = (status, body) => ({
   ok: status < 400,
@@ -57,6 +67,14 @@ function stubFetch(url, options = {}) {
       host: 'demo', demo: true, runtime: 'systemd', version: '1.1.0'
     }));
   }
+  if (url.startsWith('/api/store/jobs/')) {
+    return Promise.resolve(respond(200, {ok: true, job: {id: url.split('/').pop(), app: 'debian-packages', action: 'install', state: 'done', log: ['$ apt-get install -y wget', 'Reading package lists...'], started: 0, finished: 1}}));
+  }
+  if (url.startsWith('/api/store/')) {
+    const id = url.split('/')[3];
+    return Promise.resolve(respond(202, {ok: true, app: id, job: 'job-1'}));
+  }
+  if (url.startsWith('/api/store')) return Promise.resolve(respond(200, STORE));
   if (url.startsWith('/api/system')) return Promise.resolve(respond(200, SYSTEM));
   if (url.startsWith('/api/files/search')) {
     const query = new URL(url, 'http://localhost').searchParams.get('q') || '';
@@ -184,6 +202,28 @@ assert.equal(doc.querySelectorAll('.terminal-tab.active').length, 1, 'only one t
 await click(doc.querySelector('.tab-close[data-close="0"]'));
 assert.equal(doc.querySelectorAll('.terminal-tab').length, 1, 'closing a tab removes it');
 assert.match(doc.querySelector('.terminal-tab span').textContent, /bash 2/, 'the remaining tab keeps its session');
+
+// The Store lists the catalog, filters it, and installs through the job API.
+await click(doc.querySelector('.dock-button[data-app="store"]'));
+await settle(60);
+assert.equal(doc.querySelectorAll('.store-card').length, 3, 'the store renders every catalog entry');
+assert.match(doc.querySelector('.store-count').textContent, /3 apps · 1 installed/, 'the header summarizes the catalog');
+assert.ok(doc.querySelector('.store-card[data-id="htop"] .store-install').disabled, 'package installs are disabled without a privileged runtime');
+assert.ok(doc.querySelector('.store-card[data-id="python-repl"] .store-open'), 'installed apps can be opened');
+assert.equal(doc.querySelectorAll('.desktop-icon[data-shortcut]').length, 1, 'installed shortcuts appear on the desktop');
+await click(doc.querySelector('.store-cat[data-cat="Links"]'));
+assert.equal(doc.querySelectorAll('.store-card').length, 1, 'category chips filter the grid');
+await click(doc.querySelector('.store-cat[data-cat="All"]'));
+const storeSearch = doc.querySelector('.store-search');
+storeSearch.value = 'python';
+storeSearch.dispatchEvent(new window.Event('input', {bubbles: true}));
+assert.equal(doc.querySelectorAll('.store-card').length, 1, 'the search field filters the grid');
+storeSearch.value = '';
+storeSearch.dispatchEvent(new window.Event('input', {bubbles: true}));
+await click(doc.querySelector('.store-card[data-id="debian-packages"] .store-install'));
+assert.ok(calls.some(call => call === 'POST /api/store/debian-packages/install'), 'install posts to the store API');
+await settle(1300);
+assert.ok(calls.some(call => call.includes('/api/store/jobs/job-1')), 'the store polls the job for progress');
 
 console.log('frontend smoke test passed');
 dom.window.close();

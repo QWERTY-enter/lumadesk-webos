@@ -32,7 +32,8 @@
     locked: false,
     quickTimer: null,
     uploadTarget: null,
-    lastSystem: null
+    lastSystem: null,
+    shortcuts: []
   };
 
   async function api(path, options = {}) {
@@ -211,6 +212,7 @@
     if (state.session?.runtime && state.session.runtime !== 'systemd') {
       setTimeout(() => toast('Platform compatibility mode', 'Terminal, files, and monitoring are ready. systemd service control is unavailable on this host.'), 450);
     }
+    refreshStoreShortcuts();
     if (!localStorage.getItem('lumadesk.seen')) {
       openApp('welcome');
       localStorage.setItem('lumadesk.seen', '1');
@@ -784,7 +786,7 @@
 
   const TERMINAL_THEME = {background:'#090e15', foreground:'#cbd5df', cursor:'#79e6c6', cursorAccent:'#090e15', selectionBackground:'#2a5f5b88', black:'#111820', red:'#f0787f', green:'#74d9af', yellow:'#e5c07b', blue:'#74a8e8', magenta:'#b28ade', cyan:'#67d2ce', white:'#dce3ea', brightBlack:'#536070', brightRed:'#ff8d93', brightGreen:'#8ce9c3', brightYellow:'#f0d08c', brightBlue:'#8bbaff', brightMagenta:'#c49bf4', brightCyan:'#83e8df', brightWhite:'#f5f7fa'};
 
-  function mountTerminal(win) {
+  function mountTerminal(win, options = {}) {
     if (!window.Terminal || !window.FitAddon) throw new Error('Terminal assets did not load');
     const tabBar = $('.terminal-tabs', win);
     const panes = $('.terminal-panes', win);
@@ -830,7 +832,12 @@
         if (typeof event.data === 'string') {
           try {
             const data = JSON.parse(event.data);
-            if (data.type === 'ready') { session.status = `${data.user}@${data.host}`; paintTabs(); return; }
+            if (data.type === 'ready') {
+              session.status = `${data.user}@${data.host}`;
+              paintTabs();
+              if (session.command) { socket.send(JSON.stringify({type: 'input', data: `${session.command}\r`})); session.command = null; }
+              return;
+            }
           } catch (_) { session.terminal.write(event.data); }
         } else session.terminal.write(new Uint8Array(event.data));
       };
@@ -842,6 +849,7 @@
       socket.onerror = () => { session.status = 'connection error'; paintTabs(); };
     };
 
+    let pendingCommand = options.command || null;
     const createSession = () => {
       created += 1;
       const pane = document.createElement('div');
@@ -854,7 +862,8 @@
       const fit = new window.FitAddon.FitAddon();
       terminal.loadAddon(fit);
       terminal.open(pane);
-      const session = {title: `bash ${created}`, pane, terminal, fit, socket: null, reconnectTimer: null, status: 'connecting…', active: false, observer: null};
+      const session = {title: `bash ${created}`, pane, terminal, fit, socket: null, reconnectTimer: null, status: 'connecting…', active: false, observer: null, command: pendingCommand};
+      pendingCommand = null;
       session.observer = new ResizeObserver(() => requestAnimationFrame(() => { if (session.active) fitSession(session); }));
       session.observer.observe(pane);
       terminal.onData(data => { if (session.socket?.readyState === WebSocket.OPEN) session.socket.send(JSON.stringify({type: 'input', data})); });
@@ -1085,10 +1094,179 @@
     $('.settings-logout',win).addEventListener('click',signOut);
   }
 
+  // Store (CasaOS-style app catalog)
+  function storeMarkup() {
+    return `<div class="store-shell">
+      <div class="store-head">
+        <div class="store-heading"><strong>Store</strong><span class="store-count">Loading catalog…</span></div>
+        <div class="search-field store-search-field">${svg('search')}<input class="store-search" placeholder="Search apps" autocomplete="off"></div>
+      </div>
+      <div class="store-cats"></div>
+      <div class="store-grid"><div class="app-empty" style="grid-column:1/-1"><div><div class="spinner"></div><p>Loading catalog…</p></div></div></div>
+    </div>`;
+  }
+
+  function mountStore(win) {
+    const local = {apps: [], category: 'All', query: '', jobs: new Map()};
+    win._storeState = local;
+    const grid = $('.store-grid', win);
+
+    const categories = () => ['All', ...new Set(local.apps.map(app => app.category))];
+
+    const renderCategories = () => {
+      $('.store-cats', win).innerHTML = categories().map(category => {
+        const total = category === 'All' ? local.apps.length : local.apps.filter(app => app.category === category).length;
+        return `<button class="store-cat${category === local.category ? ' active' : ''}" data-cat="${attr(category)}">${esc(category)}<span>${total}</span></button>`;
+      }).join('');
+    };
+
+    const renderApps = () => {
+      const query = local.query.trim().toLowerCase();
+      const apps = local.apps.filter(app => (local.category === 'All' || app.category === local.category)
+        && (!query || `${app.name} ${app.tagline} ${app.category}`.toLowerCase().includes(query)));
+      if (!apps.length) {
+        grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><strong>No apps match</strong><p>Try another search term or category.</p></div></div>`;
+        return;
+      }
+      grid.innerHTML = apps.map(app => {
+        const job = local.jobs.get(app.id);
+        const busy = job && job.state !== 'done' && job.state !== 'failed';
+        const action = busy
+          ? `<button class="tool-button" disabled><span class="spinner mini"></span>${job.action === 'install' ? 'Installing' : 'Removing'}…</button>`
+          : app.installed
+            ? `<button class="tool-button primary store-open">Open</button><button class="tool-button store-uninstall" ${app.installable || app.type !== 'package' ? '' : 'disabled'}>Uninstall</button>`
+            : `<button class="tool-button primary store-install" ${app.installable ? '' : 'disabled'}>Install</button>`;
+        return `<article class="store-card${app.installed ? ' installed' : ''}" data-id="${attr(app.id)}">
+          <span class="store-icon">${app.icon}</span>
+          <div class="store-copy"><strong>${esc(app.name)}</strong><span>${esc(app.tagline)}</span></div>
+          <div class="store-meta"><span class="store-cat-chip">${esc(app.category)}</span>${app.installed ? '<span class="store-installed">Installed</span>' : ''}${app.type === 'package' ? `<span class="store-kind">apt</span>` : `<span class="store-kind">${esc(app.type)}</span>`}</div>
+          <div class="store-actions">${action}<button class="tool-button icon-tool store-log" title="Show job log" ${job ? '' : 'disabled'}>${svg('refresh')}</button></div>
+        </article>`;
+      }).join('');
+    };
+
+    const showLog = app => {
+      const job = local.jobs.get(app.id);
+      const drawer = document.createElement('div');
+      drawer.className = 'log-drawer';
+      drawer.innerHTML = `<div class="log-header"><strong>${esc(app.name)} · ${esc(job?.action || 'install')}</strong><button class="tool-button log-close">${svg('close')} Close</button></div><pre class="log-content">No output yet.</pre>`;
+      $('.window-content', win).append(drawer);
+      $('.log-close', drawer).addEventListener('click', () => drawer.remove());
+      if (job) $('.log-content', drawer).textContent = job.log.join('\n\n') || 'Waiting for output…';
+    };
+
+    const pollJob = async (app, jobId) => {
+      for (let attempt = 0; attempt < 240; attempt += 1) {
+        await sleep(900);
+        let job;
+        try { job = (await api(`/api/store/jobs/${encodeURIComponent(jobId)}`)).job; } catch (_) { return; }
+        local.jobs.set(app.id, job);
+        renderApps();
+        if (job.state === 'done') {
+          toast('Store', `${app.name} ${job.action === 'install' ? 'installed' : 'removed'}.`);
+          await load();
+          return;
+        }
+        if (job.state === 'failed') {
+          toast('Store', `${app.name}: ${job.action} failed. Open the log for details.`, 'error', 6000);
+          await load();
+          return;
+        }
+      }
+    };
+
+    const run = async (app, action) => {
+      if (action === 'uninstall') {
+        const answer = await showDialog({
+          title: `Uninstall ${app.name}?`,
+          message: app.type === 'package' ? `apt will remove ${app.packages.join(', ')} from this container.` : 'The launcher entry will be removed from this desktop.',
+          confirm: 'Uninstall', danger: true
+        });
+        if (!answer) return;
+      }
+      try {
+        const result = await api(`/api/store/${encodeURIComponent(app.id)}/${action}`, {method: 'POST', body: {}});
+        local.jobs.set(app.id, {action, state: 'queued', log: []});
+        renderApps();
+        pollJob(app, result.job);
+      } catch (error) { toast('Store', error.message, 'error'); }
+    };
+
+    const load = async () => {
+      try {
+        const data = await api('/api/store');
+        local.apps = data.apps;
+        const installed = data.apps.filter(app => app.installed).length;
+        $('.store-count', win).textContent = `${data.count} apps · ${installed} installed`;
+        if (!data.package_install_supported) {
+          $('.store-count', win).title = data.package_install_message;
+        }
+        renderCategories();
+        renderApps();
+      } catch (error) {
+        grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><strong>Store unavailable</strong><p>${esc(error.message)}</p></div></div>`;
+      }
+    };
+    local.load = load;
+
+    grid.addEventListener('click', event => {
+      const card = event.target.closest('.store-card');
+      if (!card) return;
+      const app = local.apps.find(candidate => candidate.id === unattr(card.dataset.id));
+      if (!app) return;
+      if (event.target.closest('.store-log')) return showLog(app);
+      if (event.target.closest('.store-install')) return run(app, 'install');
+      if (event.target.closest('.store-uninstall')) return run(app, 'uninstall');
+      if (event.target.closest('.store-open')) return openStoreApp(app);
+    });
+    $('.store-cats', win).addEventListener('click', event => {
+      const button = event.target.closest('.store-cat');
+      if (!button) return;
+      local.category = unattr(button.dataset.cat);
+      renderCategories();
+      renderApps();
+    });
+    $('.store-search', win).addEventListener('input', event => { local.query = event.target.value; renderApps(); });
+    load();
+  }
+
+  function openStoreApp(app) {
+    if (app.type === 'link') { window.open(app.url, '_blank', 'noopener'); return; }
+    if (app.launch?.command) {
+      openApp('terminal', {key: `terminal:${app.id}`, title: app.launch.label || app.name, command: app.launch.command});
+      return;
+    }
+    openApp('terminal');
+  }
+
+  async function refreshStoreShortcuts() {
+    try {
+      const data = await api('/api/store');
+      state.shortcuts = data.apps.filter(app => app.installed && (app.launch || app.type === 'link'));
+    } catch (_) { state.shortcuts = []; }
+    populateLauncher();
+    renderDesktopShortcuts();
+  }
+
+  function renderDesktopShortcuts() {
+    const holder = $('#desktop-icons');
+    if (!holder) return;
+    $$('.desktop-icon[data-shortcut]', holder).forEach(node => node.remove());
+    (state.shortcuts || []).slice(0, 8).forEach(app => {
+      const button = document.createElement('button');
+      button.className = 'desktop-icon';
+      button.dataset.shortcut = app.id;
+      button.innerHTML = `<span class="app-icon icon-shortcut">${app.icon}</span><span>${esc(app.launch?.label || app.name)}</span>`;
+      button.addEventListener('click', () => openStoreApp(app));
+      holder.append(button);
+    });
+  }
+
   const apps = {
     welcome: {title:'Welcome',icon:'welcome',width:790,height:570,render:welcomeMarkup,mount:mountWelcome},
     files: {title:'Files',icon:'files',width:890,height:570,render:filesMarkup,mount:mountFiles},
     terminal: {title:'Terminal',icon:'terminal',width:820,height:510,render:terminalMarkup,mount:mountTerminal},
+    store: {title:'Store',icon:'store',width:1000,height:640,render:storeMarkup,mount:mountStore},
     services: {title:'Services',icon:'services',width:960,height:590,render:servicesMarkup,mount:mountServices},
     system: {title:'System Monitor',icon:'system',width:900,height:610,render:systemMarkup,mount:mountSystem},
     settings: {title:'Settings',icon:'settings',width:720,height:520,render:settingsMarkup,mount:mountSettings},
@@ -1096,9 +1274,15 @@
   };
 
   function populateLauncher(){
-    const order=['files','terminal','services','system','settings','welcome'];
-    $('#launcher-grid').innerHTML=order.map(id=>`<button class="launcher-app" data-app="${id}" data-search="${apps[id].title.toLowerCase()}">${icon(apps[id].icon)}<span>${esc(apps[id].title)}</span></button>`).join('');
-    $$('.launcher-app').forEach(button=>button.addEventListener('click',()=>openApp(button.dataset.app)));
+    const order=['files','terminal','store','services','system','settings','welcome'];
+    const builtIn=order.map(id=>`<button class="launcher-app" data-app="${id}" data-search="${apps[id].title.toLowerCase()}">${icon(apps[id].icon)}<span>${esc(apps[id].title)}</span></button>`).join('');
+    const installed=(state.shortcuts||[]).map(app=>`<button class="launcher-app installed-app" data-shortcut="${attr(app.id)}" data-search="${esc((app.launch?.label||app.name).toLowerCase())}"><span class="app-icon icon-shortcut">${app.icon}</span><span>${esc(app.launch?.label||app.name)}</span></button>`).join('');
+    $('#launcher-grid').innerHTML=builtIn+installed;
+    $$('.launcher-app[data-app]').forEach(button=>button.addEventListener('click',()=>openApp(button.dataset.app)));
+    $$('.launcher-app[data-shortcut]').forEach(button=>button.addEventListener('click',()=>{
+      const app=(state.shortcuts||[]).find(candidate=>candidate.id===unattr(button.dataset.shortcut));
+      if(app){hidePanels();openStoreApp(app);}
+    }));
   }
 
   function bindShell(){

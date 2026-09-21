@@ -7,7 +7,7 @@ A Docker-hosted Linux workspace with a custom browser desktop, a real PTY shell,
 
 **Debian 13 · systemd · Docker · linux/amd64 · MIT licensed**
 
-Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0`
+Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0`
 
 > LumaDesk is a real Debian userspace, but it is still a container. It shares the Linux host kernel. If you need a separately booted kernel, kernel modules, or stronger tenant isolation, use a VM rather than Docker.
 
@@ -17,6 +17,7 @@ Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0`
 - Password authentication, signed HTTP-only sessions, CSRF checks, login throttling, and strict browser security headers
 - PTY-backed Bash terminal using xterm.js with multiple tabs; shells run as the unprivileged `webos` account
 - Persistent file manager with workspace search, upload (including drag-and-drop), download, create, edit, rename, right-click actions, and a restorable Trash
+- CasaOS-style Store that installs curated Debian packages, adds launcher shortcuts, and tracks installed state
 - systemd service manager with state, start/stop/restart, startup state, and journal viewer
 - Live CPU, RAM, storage, host details, and process manager based on `/proc`/psutil
 - Debian tools including Git, curl, nano, Vim, procps, iproute2, ping, cron, and journal access for the workspace user
@@ -57,7 +58,7 @@ Docker Desktop can run many parts of the project, but systemd/cgroup behavior va
 
 Railway does not expose privileged containers or writable cgroups, so it cannot run the full systemd PID 1 mode. LumaDesk detects Railway automatically and starts a compatibility runtime instead. The browser desktop, PTY terminal, files, editor, uploads, downloads, process list, and live metrics work; the **Services** app and systemd maintenance timer are disabled.
 
-1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0` as a Railway service.
+1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` as a Railway service.
 2. Add this service variable in the Railway dashboard:
 
 ```dotenv
@@ -90,7 +91,7 @@ docker compose pull webos
 docker compose up -d --no-build
 ```
 
-This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
+This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
 
 To build locally from the checked-out source instead:
 
@@ -145,6 +146,32 @@ WEBOS_PASSWORD='a-long-unique-password' ./scripts/setup.sh --force
 ```
 
 Passwords must contain at least 8 characters; 12 or more is strongly recommended. `WEBOS_SECRET` is optional and is generated automatically when omitted or too short. Do not commit `.env`; it is ignored by Git and excluded from Docker builds.
+
+## App Store
+
+The Store is a curated catalog, not a free-form package installer: the browser sends a
+catalog id and the backend maps it to a fixed payload. Three entry types are supported:
+
+| Type | Install action | Where it appears |
+|---|---|---|
+| `package` | `apt-get install -y --no-install-recommends <allowlisted packages>` | Launcher tile when the entry declares a command |
+| `shortcut` | Records a launcher that opens a Terminal running a preset command | Launcher and desktop |
+| `link` | Records an external HTTPS resource | Launcher and desktop |
+
+```text
+GET  /api/store                 catalog merged with installed state (from dpkg-query)
+POST /api/store/{id}/install    starts a background job, returns {"job": "<id>"}
+POST /api/store/{id}/uninstall  same, for removal
+GET  /api/store/jobs/{job}      job state and command log
+```
+
+Installs are serialized behind a global lock and their output is kept in a job log you can
+open from the app card. Installed entries persist in `$WEBOS_STATE/installed-apps.json`.
+
+Package installation needs the privileged systemd runtime, because the backend must be root
+to run `apt-get`. On Railway or `WEBOS_RUNTIME=standalone` the Store still works for
+shortcuts and links, and package cards explain that installs are unavailable instead of
+failing halfway.
 
 ## Files, Trash, and recovery
 
@@ -232,6 +259,9 @@ This stack deliberately uses a privileged container so systemd can manage cgroup
 - Use a unique password and put the public endpoint behind an identity-aware proxy or VPN if possible.
 - The browser shell is non-root and has no sudo grant. It belongs to `systemd-journal` for log inspection; the authenticated web backend remains privileged to operate service units.
 - LumaDesk is intended for one trusted administrator, not hostile multi-tenant hosting.
+- The Store runs `apt-get` as root inside the container. It only accepts ids from the
+  built-in catalog, and every package name is validated against a strict pattern, but
+  installing software still changes the runtime — review catalog entries before adding them.
 
 ## Troubleshooting
 

@@ -253,6 +253,98 @@ class SearchTests(ApiTestCase):
         self.assertEqual((await anonymous.get("/api/files/search?q=notes")).status, 401)
 
 
+class StoreTests(ApiTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        server.store_registry_path().unlink(missing_ok=True)
+
+    async def job_finished(self, job_id: str) -> dict:
+        for _ in range(60):
+            job = (await (await self.client.get(f"/api/store/jobs/{job_id}")).json())["job"]
+            if job["state"] in {"done", "failed"}:
+                return job
+            await asyncio.sleep(0.05)
+        self.fail("store job never finished")
+
+    def test_catalog_is_well_formed(self):
+        ids = [entry["id"] for entry in server.STORE_CATALOG]
+        self.assertEqual(len(ids), len(set(ids)), "store ids must be unique")
+        self.assertGreaterEqual(len(ids), 20, "the catalog should stay useful")
+        for entry in server.STORE_CATALOG:
+            with self.subTest(app=entry["id"]):
+                self.assertIn(entry["type"], {"package", "shortcut", "link"})
+                self.assertTrue(entry["name"] and entry["tagline"] and entry["category"] and entry["icon"])
+                if entry["type"] == "package":
+                    self.assertTrue(entry["packages"])
+                    for package in entry["packages"]:
+                        self.assertRegex(package, r"^[a-z0-9][a-z0-9+\-.]*$")
+                if entry["type"] == "shortcut":
+                    self.assertTrue(entry["launch"]["command"])
+                if entry["type"] == "link":
+                    self.assertTrue(entry["url"].startswith("https://"))
+
+    async def test_store_reports_catalog_and_install_state(self):
+        data = await (await self.client.get("/api/store")).json()
+        self.assertEqual(data["count"], len(server.STORE_CATALOG))
+        for app in data["apps"]:
+            for key in ("id", "name", "tagline", "category", "icon", "type", "installed", "installable"):
+                self.assertIn(key, app)
+        supported, _ = server.package_install_status()
+        self.assertEqual(data["package_install_supported"], supported)
+
+    async def test_shortcut_install_and_uninstall_round_trip(self):
+        install = await self.client.post("/api/store/python-repl/install", json={}, headers=self.headers)
+        self.assertEqual(install.status, 202)
+        job = await self.job_finished((await install.json())["job"])
+        self.assertEqual(job["state"], "done")
+        self.assertIn("python-repl", server.read_store_registry())
+
+        listing = await (await self.client.get("/api/store")).json()
+        entry = next(app for app in listing["apps"] if app["id"] == "python-repl")
+        self.assertTrue(entry["installed"])
+
+        duplicate = await self.client.post("/api/store/python-repl/install", json={}, headers=self.headers)
+        self.assertEqual(duplicate.status, 409)
+
+        removal = await self.client.post("/api/store/python-repl/uninstall", json={}, headers=self.headers)
+        self.assertEqual((await self.job_finished((await removal.json())["job"]))["state"], "done")
+        self.assertNotIn("python-repl", server.read_store_registry())
+
+    async def test_unknown_store_app_is_rejected(self):
+        response = await self.client.post("/api/store/not-in-the-catalog/install", json={}, headers=self.headers)
+        self.assertEqual(response.status, 404)
+
+    async def test_package_install_reports_when_the_runtime_cannot_install(self):
+        supported, message = server.package_install_status()
+        response = await self.client.post("/api/store/htop/install", json={}, headers=self.headers)
+        if supported:
+            self.assertEqual(response.status, 202)
+            await self.job_finished((await response.json())["job"])
+        else:
+            self.assertEqual(response.status, 409)
+            self.assertEqual((await response.json())["error"], message)
+
+    async def test_failed_package_job_keeps_its_log(self):
+        supported, _ = server.package_install_status()
+        if supported:
+            self.skipTest("runs where apt cannot install without root")
+        entry = {"id": "fixture", "type": "package", "packages": ["lumadesk-not-a-real-package"]}
+        job = server._new_store_job(entry["id"], "install")
+        await server._run_store_job(job, entry, "install")
+        self.assertEqual(job["state"], "failed")
+        self.assertTrue(job["log"], "the job keeps the command output for the UI")
+        self.assertIsNotNone(job["finished"])
+        self.assertNotIn("fixture", server.read_store_registry())
+
+    async def test_store_routes_require_authentication_and_csrf(self):
+        anonymous = TestClient(TestServer(server.create_app()))
+        await anonymous.start_server()
+        self.addAsyncCleanup(anonymous.close)
+        self.assertEqual((await anonymous.get("/api/store")).status, 401)
+        forged = await self.client.post("/api/store/python-repl/install", json={}, headers={"X-LumaDesk-CSRF": "wrong"})
+        self.assertEqual(forged.status, 403)
+
+
 class TerminalSocketTests(ApiTestCase):
     async def test_terminal_streams_a_real_shell(self):
         if not shutil.which("bash"):

@@ -812,12 +812,12 @@ async def empty_trash(_: web.Request) -> web.Response:
     return json_response({"ok": True, "removed": removed})
 
 
-async def run_command(*args: str, timeout: float = 12) -> tuple[int, str, str]:
+async def run_command(*args: str, timeout: float = 12, extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "LC_ALL": "C", "SYSTEMD_COLORS": "0"},
+        env={**os.environ, "LC_ALL": "C", "SYSTEMD_COLORS": "0", **(extra_env or {})},
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
@@ -1118,6 +1118,304 @@ async def terminal_socket(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+# ---------------------------------------------------------------------------
+# Store: a CasaOS-style app catalog. Package entries install real Debian
+# packages inside the container through an allowlisted catalog; shortcut and
+# link entries only record a launcher in the application state directory.
+# ---------------------------------------------------------------------------
+PACKAGE_RE = re.compile(r"^[a-z0-9][a-z0-9+\-.]*$")
+
+STORE_CATALOG: list[dict[str, Any]] = [
+    {"id": "htop", "name": "htop", "tagline": "Interactive process viewer", "category": "System", "icon": "📈",
+     "type": "package", "packages": ["htop"], "launch": {"label": "htop", "command": "htop"}},
+    {"id": "btop", "name": "btop", "tagline": "Resource monitor with a modern UI", "category": "System", "icon": "📊",
+     "type": "package", "packages": ["btop"], "launch": {"label": "btop", "command": "btop"}},
+    {"id": "ncdu", "name": "ncdu", "tagline": "Disk usage explorer", "category": "System", "icon": "🧭",
+     "type": "package", "packages": ["ncdu"], "launch": {"label": "ncdu", "command": "ncdu ~"}},
+    {"id": "tmux", "name": "tmux", "tagline": "Terminal multiplexer with sessions", "category": "System", "icon": "🧩",
+     "type": "package", "packages": ["tmux"], "launch": {"label": "tmux", "command": "tmux"}},
+    {"id": "mc", "name": "Midnight Commander", "tagline": "Two-pane terminal file manager", "category": "System", "icon": "🗂️",
+     "type": "package", "packages": ["mc"], "launch": {"label": "mc", "command": "mc"}},
+    {"id": "screen", "name": "GNU Screen", "tagline": "Detachable terminal sessions", "category": "System", "icon": "🖥️",
+     "type": "package", "packages": ["screen"]},
+    {"id": "git", "name": "Git", "tagline": "Version control (bundled)", "category": "Development", "icon": "🌿",
+     "type": "package", "packages": ["git"]},
+    {"id": "curl", "name": "curl", "tagline": "HTTP client (bundled)", "category": "Networking", "icon": "🔗",
+     "type": "package", "packages": ["curl"]},
+    {"id": "build-essential", "name": "Build Essential", "tagline": "gcc, make, and libc headers", "category": "Development", "icon": "🛠️",
+     "type": "package", "packages": ["build-essential"]},
+    {"id": "python3-pip", "name": "pip", "tagline": "Python package installer", "category": "Development", "icon": "🐍",
+     "type": "package", "packages": ["python3-pip"]},
+    {"id": "nodejs", "name": "Node.js", "tagline": "JavaScript runtime with npm", "category": "Development", "icon": "🟩",
+     "type": "package", "packages": ["nodejs", "npm"]},
+    {"id": "ripgrep", "name": "ripgrep", "tagline": "Fast recursive code search (rg)", "category": "Development", "icon": "🔎",
+     "type": "package", "packages": ["ripgrep"]},
+    {"id": "fd-find", "name": "fd", "tagline": "Friendly alternative to find", "category": "Development", "icon": "📁",
+     "type": "package", "packages": ["fd-find"]},
+    {"id": "jq", "name": "jq", "tagline": "Command-line JSON processor", "category": "Development", "icon": "🧮",
+     "type": "package", "packages": ["jq"]},
+    {"id": "sqlite3", "name": "SQLite", "tagline": "SQL database command line", "category": "Development", "icon": "🗃️",
+     "type": "package", "packages": ["sqlite3"], "launch": {"label": "sqlite3", "command": "sqlite3"}},
+    {"id": "neovim", "name": "Neovim", "tagline": "Extensible editor (nvim)", "category": "Development", "icon": "📝",
+     "type": "package", "packages": ["neovim"], "launch": {"label": "nvim", "command": "nvim"}},
+    {"id": "nmap", "name": "Nmap", "tagline": "Network discovery and port scan", "category": "Networking", "icon": "🛰️",
+     "type": "package", "packages": ["nmap"]},
+    {"id": "dnsutils", "name": "dig", "tagline": "DNS lookup utilities", "category": "Networking", "icon": "🌐",
+     "type": "package", "packages": ["dnsutils"]},
+    {"id": "traceroute", "name": "traceroute", "tagline": "Trace the path to a host", "category": "Networking", "icon": "🧭",
+     "type": "package", "packages": ["traceroute"]},
+    {"id": "netcat", "name": "netcat", "tagline": "TCP/UDP swiss army knife", "category": "Networking", "icon": "🔌",
+     "type": "package", "packages": ["netcat-openbsd"]},
+    {"id": "openssh-client", "name": "OpenSSH client", "tagline": "ssh, scp, and sftp", "category": "Networking", "icon": "🔐",
+     "type": "package", "packages": ["openssh-client"]},
+    {"id": "rsync", "name": "rsync", "tagline": "Incremental file transfer", "category": "Networking", "icon": "🔁",
+     "type": "package", "packages": ["rsync"]},
+    {"id": "aria2", "name": "aria2", "tagline": "Multi-connection downloader", "category": "Networking", "icon": "⬇️",
+     "type": "package", "packages": ["aria2"]},
+    {"id": "wget", "name": "wget", "tagline": "Non-interactive retriever", "category": "Networking", "icon": "📥",
+     "type": "package", "packages": ["wget"]},
+    {"id": "rclone", "name": "rclone", "tagline": "Sync with cloud storage", "category": "Utilities", "icon": "☁️",
+     "type": "package", "packages": ["rclone"]},
+    {"id": "tree", "name": "tree", "tagline": "Recursive directory listing", "category": "Utilities", "icon": "🌳",
+     "type": "package", "packages": ["tree"]},
+    {"id": "unzip", "name": "unzip", "tagline": "Extract zip archives", "category": "Utilities", "icon": "📦",
+     "type": "package", "packages": ["unzip"]},
+    {"id": "p7zip", "name": "7-Zip", "tagline": "7z archive support", "category": "Utilities", "icon": "🗜️",
+     "type": "package", "packages": ["p7zip-full"]},
+    {"id": "bat", "name": "bat", "tagline": "cat with syntax highlighting", "category": "Utilities", "icon": "🦇",
+     "type": "package", "packages": ["bat"]},
+    {"id": "eza", "name": "eza", "tagline": "Modern ls replacement", "category": "Utilities", "icon": "✨",
+     "type": "package", "packages": ["eza"]},
+    {"id": "pandoc", "name": "Pandoc", "tagline": "Convert documents between formats", "category": "Utilities", "icon": "📄",
+     "type": "package", "packages": ["pandoc"]},
+    {"id": "ffmpeg", "name": "FFmpeg", "tagline": "Audio and video toolkit", "category": "Media", "icon": "🎞️",
+     "type": "package", "packages": ["ffmpeg"]},
+    {"id": "imagemagick", "name": "ImageMagick", "tagline": "Image conversion and editing", "category": "Media", "icon": "🖼️",
+     "type": "package", "packages": ["imagemagick"]},
+    {"id": "restic", "name": "restic", "tagline": "Encrypted, deduplicated backups", "category": "Utilities", "icon": "🛡️",
+     "type": "package", "packages": ["restic"]},
+    {"id": "borgbackup", "name": "Borg", "tagline": "Deduplicating backup program", "category": "Utilities", "icon": "🧰",
+     "type": "package", "packages": ["borgbackup"]},
+    {"id": "hugo", "name": "Hugo", "tagline": "Static site generator", "category": "Development", "icon": "🚀",
+     "type": "package", "packages": ["hugo"]},
+    {"id": "python-repl", "name": "Python REPL", "tagline": "Interactive Python prompt", "category": "Shortcuts", "icon": "🐍",
+     "type": "shortcut", "launch": {"label": "Python REPL", "command": "python3"}},
+    {"id": "disk-report", "name": "Disk report", "tagline": "Show workspace disk usage", "category": "Shortcuts", "icon": "💾",
+     "type": "shortcut", "launch": {"label": "Disk report", "command": "df -h; du -sh ~/* 2>/dev/null | sort -h"}},
+    {"id": "service-journal", "name": "LumaDesk journal", "tagline": "Tail this service's logs", "category": "Shortcuts", "icon": "📜",
+     "type": "shortcut", "launch": {"label": "Journal", "command": "journalctl -u lumadesk.service -n 100 --no-pager"}},
+    {"id": "debian-packages", "name": "Debian packages", "tagline": "Search the Debian archive", "category": "Links", "icon": "🔎",
+     "type": "link", "url": "https://packages.debian.org/"},
+    {"id": "lumadesk-source", "name": "LumaDesk source", "tagline": "Repository, releases, and docs", "category": "Links", "icon": "📘",
+     "type": "link", "url": "https://github.com/QWERTY-enter/lumadesk-webos"},
+]
+
+STORE_JOBS: dict[str, dict[str, Any]] = {}
+STORE_JOB_LIMIT = 25
+STORE_LOCK = asyncio.Lock()
+
+
+def _validate_catalog() -> None:
+    """Fail fast on a malformed catalog instead of at install time."""
+    seen: set[str] = set()
+    for entry in STORE_CATALOG:
+        if entry["id"] in seen:
+            raise SystemExit(f"Duplicate store app id: {entry['id']}")
+        seen.add(entry["id"])
+        if entry["type"] == "package":
+            if not entry.get("packages"):
+                raise SystemExit(f"Store app {entry['id']} declares no packages")
+            for package in entry["packages"]:
+                if not PACKAGE_RE.fullmatch(package):
+                    raise SystemExit(f"Invalid package name in store catalog: {package!r}")
+        elif entry["type"] == "link":
+            if not str(entry.get("url", "")).startswith("https://"):
+                raise SystemExit(f"Store link {entry['id']} must use https")
+        elif entry["type"] != "shortcut":
+            raise SystemExit(f"Unknown store app type: {entry['type']}")
+        if entry["type"] in {"shortcut"} and not entry.get("launch", {}).get("command"):
+            raise SystemExit(f"Store shortcut {entry['id']} declares no command")
+
+
+def catalog_entry(app_id: str) -> dict[str, Any]:
+    for entry in STORE_CATALOG:
+        if entry["id"] == app_id:
+            return entry
+    raise web.HTTPNotFound(reason="Unknown store app")
+
+
+def store_registry_path() -> Path:
+    return STATE_DIR / "installed-apps.json"
+
+
+def read_store_registry() -> dict[str, Any]:
+    try:
+        data = json.loads(store_registry_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_store_registry(data: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    target = store_registry_path()
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    temporary.replace(target)
+
+
+async def dpkg_installed() -> set[str]:
+    """Package names dpkg considers fully installed."""
+    if not shutil.which("dpkg-query"):
+        return set()
+    code, output, _ = await run_command("dpkg-query", "-W", "-f=${Package}\t${db:Status-Status}\n", timeout=20)
+    if code:
+        return set()
+    return {line.split("\t", 1)[0] for line in output.splitlines() if line.endswith("installed")}
+
+
+def package_install_status() -> tuple[bool, str]:
+    if not shutil.which("apt-get"):
+        return False, "apt-get is unavailable in this runtime."
+    if os.geteuid() != 0:
+        return False, "Package installation needs the privileged runtime; this process is not running as root."
+    return True, ""
+
+
+async def store_list(_: web.Request) -> web.Response:
+    installed_packages = await dpkg_installed()
+    registry = read_store_registry()
+    supported, message = package_install_status()
+    apps: list[dict[str, Any]] = []
+    for entry in STORE_CATALOG:
+        if entry["type"] == "package":
+            installed = all(package in installed_packages for package in entry["packages"])
+            installable = installed or supported
+        else:
+            installed = entry["id"] in registry
+            installable = True
+        apps.append(
+            {
+                "id": entry["id"],
+                "name": entry["name"],
+                "tagline": entry["tagline"],
+                "category": entry["category"],
+                "icon": entry["icon"],
+                "type": entry["type"],
+                "packages": entry.get("packages", []),
+                "launch": entry.get("launch"),
+                "url": entry.get("url"),
+                "installed": installed,
+                "installable": installable,
+            }
+        )
+    return json_response(
+        {
+            "ok": True,
+            "count": len(apps),
+            "installed": sum(1 for app in apps if app["installed"]),
+            "package_install_supported": supported,
+            "package_install_message": message,
+            "apps": apps,
+        }
+    )
+
+
+def _new_store_job(app_id: str, action: str) -> dict[str, Any]:
+    job = {
+        "id": secrets.token_urlsafe(8),
+        "app": app_id,
+        "action": action,
+        "state": "queued",
+        "log": [],
+        "started": int(time.time()),
+        "finished": None,
+    }
+    STORE_JOBS[job["id"]] = job
+    while len(STORE_JOBS) > STORE_JOB_LIMIT:
+        oldest = min(STORE_JOBS, key=lambda key: STORE_JOBS[key]["started"])
+        STORE_JOBS.pop(oldest, None)
+    return job
+
+
+async def _run_store_job(job: dict[str, Any], entry: dict[str, Any], action: str) -> None:
+    async with STORE_LOCK:
+        job["state"] = "running"
+        registry = read_store_registry()
+        try:
+            if entry["type"] == "package":
+                if action == "install":
+                    steps = [
+                        ("apt-get", "update", "-qq"),
+                        ("apt-get", "install", "-y", "--no-install-recommends", *entry["packages"]),
+                    ]
+                else:
+                    steps = [("apt-get", "remove", "-y", *entry["packages"])]
+                for step in steps:
+                    job["log"].append("$ " + " ".join(step))
+                    code, output, error = await run_command(
+                        *step, timeout=900, extra_env={"DEBIAN_FRONTEND": "noninteractive"}
+                    )
+                    tail = (output or error).strip()
+                    if tail:
+                        job["log"].append(tail[-6000:])
+                    if code:
+                        job["state"] = "failed"
+                        job["log"].append(f"Command exited with status {code}")
+                        return
+            if action == "install":
+                registry[entry["id"]] = {
+                    "installed_at": int(time.time()),
+                    "type": entry["type"],
+                    "packages": entry.get("packages", []),
+                }
+            else:
+                registry.pop(entry["id"], None)
+            write_store_registry(registry)
+            job["state"] = "done"
+        except Exception as exc:  # surface failures in the UI instead of losing the job
+            LOG.exception("Store %s failed for %s", action, entry["id"])
+            job["state"] = "failed"
+            job["log"].append(str(exc))
+        finally:
+            job["finished"] = int(time.time())
+
+
+async def store_install(request: web.Request) -> web.Response:
+    entry = catalog_entry(request.match_info["app_id"])
+    supported, message = package_install_status()
+    if entry["type"] == "package" and not supported:
+        raise web.HTTPConflict(reason=message)
+    if entry["type"] != "package" and entry["id"] in read_store_registry():
+        raise web.HTTPConflict(reason="That app is already installed")
+    job = _new_store_job(entry["id"], "install")
+    asyncio.create_task(_run_store_job(job, entry, "install"))
+    return json_response({"ok": True, "app": entry["id"], "job": job["id"]}, 202)
+
+
+async def store_uninstall(request: web.Request) -> web.Response:
+    entry = catalog_entry(request.match_info["app_id"])
+    supported, message = package_install_status()
+    if entry["type"] == "package" and not supported:
+        raise web.HTTPConflict(reason=message)
+    job = _new_store_job(entry["id"], "uninstall")
+    asyncio.create_task(_run_store_job(job, entry, "uninstall"))
+    return json_response({"ok": True, "app": entry["id"], "job": job["id"]}, 202)
+
+
+async def store_job_status(request: web.Request) -> web.Response:
+    job = STORE_JOBS.get(request.match_info["job_id"])
+    if not job:
+        raise web.HTTPNotFound(reason="Unknown store job")
+    return json_response({"ok": True, "job": job})
+
+
+
+
+_validate_catalog()
+
+
 def create_app() -> web.Application:
     HOME_ROOT.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1147,6 +1445,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/trash/restore", restore_trash)
     app.router.add_post("/api/trash/purge", purge_trash)
     app.router.add_post("/api/trash/empty", empty_trash)
+    app.router.add_get("/api/store", store_list)
+    app.router.add_get("/api/store/jobs/{job_id}", store_job_status)
+    app.router.add_post("/api/store/{app_id}/install", store_install)
+    app.router.add_post("/api/store/{app_id}/uninstall", store_uninstall)
     app.router.add_get("/api/services", service_list)
     app.router.add_post("/api/services/{unit}/{action}", service_action)
     app.router.add_get("/api/services/{unit}/logs", service_logs)

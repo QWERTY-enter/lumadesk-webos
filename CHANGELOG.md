@@ -2,6 +2,33 @@
 
 All notable changes to LumaDesk OS are documented here. Versions follow Semantic Versioning.
 
+## [1.3.0] - 2026-09-21
+
+### Added
+
+- **Store**: a CasaOS-style app catalog with 41 entries across System, Development,
+  Networking, Media, Utilities, Shortcuts, and Links.
+  - `package` entries install real Debian packages inside the container through an
+    allowlisted catalog (the client sends a catalog id, never a package name).
+  - `shortcut` entries add a launcher tile and desktop icon that opens a Terminal running
+    a preset command; `link` entries open an external HTTPS resource.
+  - Routes: `GET /api/store`, `POST /api/store/{id}/install|uninstall`,
+    `GET /api/store/jobs/{job}`. Installs run as background jobs behind a global lock with
+    a queryable log, and installed state persists in `$WEBOS_STATE/installed-apps.json`.
+  - Install status comes from `dpkg-query`, so bundled tools show as already installed.
+- Store UI: searchable card grid, category chips with counts, install/uninstall with live
+  job progress, a job log drawer, and Open actions that launch the app.
+- Installed shortcuts render in the launcher and on the desktop, and the Terminal accepts a
+  startup command so launchers open ready-to-use sessions.
+- Backend tests for catalog integrity, install/uninstall round trips, job failure logging,
+  runtime capability reporting, and CSRF/auth on every Store route.
+
+### Changed
+
+- Package installation reports `409` with an actionable message when the process is not
+  running as root (Railway/compatibility runtimes) instead of failing mid-install.
+- Image, Compose, and setup references point at `1.3.0`.
+
 ## [1.2.0] - 2026-09-21
 
 ### Added
@@ -73,6 +100,7 @@ All notable changes to LumaDesk OS are documented here. Versions follow Semantic
 - Daily systemd maintenance timer and seeded first-run workspace.
 - GitHub Actions CI, GHCR publishing, SBOM, provenance attestation, checksums, and release archives.
 
+[1.3.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.3.0
 [1.2.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.2.0
 [1.1.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.1.0
 [1.0.1]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.0.1

@@ -275,3 +275,37 @@ body.reduce-motion *{animation-duration:.001ms!important;animation-iteration-cou
 .tab-close:hover{color:#fff;background:rgba(255,255,255,.14)}
 .terminal-panes{min-height:0;flex:1;display:flex;flex-direction:column}
 .terminal-panes .terminal-container{min-height:0;flex:1}
+
+/* Store app (1.3.0) */
+.icon-store{background:linear-gradient(145deg,#8f7bff,#4b3fd4)}
+.icon-store::before{content:"";width:19px;height:16px;border-radius:3px;background:linear-gradient(#f2efff,#cfc7ff);clip-path:polygon(0 22%,100% 22%,100% 100%,0 100%)}
+.icon-store::after{content:"";position:absolute;top:5px;left:9px;width:16px;height:5px;border-radius:2px;background:#e7e2ff}
+.icon-shortcut{background:linear-gradient(145deg,#2b3550,#151c2b);font-size:17px;line-height:1}
+.store-shell{height:100%;min-height:0;display:flex;flex-direction:column}
+.store-head{display:flex;align-items:center;gap:12px;padding:13px 15px 10px}
+.store-heading{display:flex;flex:1;flex-direction:column}
+.store-heading strong{font-size:16px;letter-spacing:-.02em}
+.store-count{margin-top:2px;color:#6f7d92;font-size:9px}
+.store-search-field input{width:170px}
+.store-cats{display:flex;gap:5px;padding:0 15px 11px;overflow-x:auto;scrollbar-width:none}
+.store-cats::-webkit-scrollbar{display:none}
+.store-cat{display:flex;align-items:center;gap:5px;height:26px;padding:0 10px;border:1px solid rgba(255,255,255,.08);border-radius:99px;color:#93a0b3;background:rgba(255,255,255,.03);cursor:pointer;font-size:10px;white-space:nowrap}
+.store-cat:hover{color:#fff;background:rgba(255,255,255,.07)}
+.store-cat.active{color:#0a1a15;border-color:transparent;background:var(--accent);font-weight:700}
+.store-cat span{padding:0 4px;border-radius:99px;background:rgba(0,0,0,.22);font-size:8px}
+.store-grid{min-height:0;flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));align-content:start;gap:9px;padding:0 15px 15px;overflow:auto}
+.store-card{display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:rgba(255,255,255,.028);transition:border-color .16s,background .16s}
+.store-card:hover{border-color:rgba(255,255,255,.16);background:rgba(255,255,255,.055)}
+.store-card.installed{border-color:rgba(var(--accent-rgb),.28);background:rgba(var(--accent-rgb),.06)}
+.store-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:10px;background:linear-gradient(145deg,#26304a,#141b28);box-shadow:inset 0 1px rgba(255,255,255,.14);font-size:19px}
+.store-copy strong{display:block;font-size:11px}
+.store-copy span{display:block;margin-top:3px;color:#7d8a9d;font-size:9px;line-height:1.45}
+.store-meta{display:flex;flex-wrap:wrap;gap:4px}
+.store-cat-chip,.store-kind,.store-installed{padding:2px 6px;border-radius:99px;font-size:8px}
+.store-cat-chip{color:#9fb0c6;background:rgba(255,255,255,.06)}
+.store-kind{color:#7f8ca0;background:rgba(0,0,0,.24);font-family:var(--mono)}
+.store-installed{color:#7ce0bd;background:rgba(78,207,166,.13)}
+.store-actions{display:flex;gap:5px;margin-top:auto}
+.store-actions .tool-button{flex:1}
+.store-actions .icon-tool{flex:0 0 auto;width:30px}
+.spinner.mini{width:12px;height:12px;margin:0 5px 0 0;border-width:2px;vertical-align:-2px}
