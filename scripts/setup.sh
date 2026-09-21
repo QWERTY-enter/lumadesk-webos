@@ -55,7 +55,7 @@ if [[ -n "$domain" ]]; then profiles="public"; fi
 cat > .env <<EOF
 WEBOS_PASSWORD='$password'
 WEBOS_SECRET='$secret'
-WEBOS_IMAGE=ghcr.io/qwerty-enter/lumadesk-webos:1.0.1
+WEBOS_IMAGE=ghcr.io/qwerty-enter/lumadesk-webos:1.1.0
 WEBOS_BIND=127.0.0.1
 WEBOS_PORT=8080
 WEBOS_DOMAIN=${domain:-os.example.com}

@@ -33,7 +33,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import psutil
 from aiohttp import WSMsgType, web
@@ -54,6 +54,25 @@ COOKIE_NAME = "lumadesk_session"
 SESSION_SECONDS = int(os.environ.get("WEBOS_SESSION_SECONDS", "28800"))
 DEMO_MODE = os.environ.get("WEBOS_DEMO", "false").lower() in {"1", "true", "yes"}
 MIN_PASSWORD_LENGTH = 8
+TRASH_STAMP_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?-")
+
+
+def _read_version() -> str:
+    """Report the packaged release version, tolerating source checkouts."""
+    override = os.environ.get("WEBOS_VERSION", "").strip()
+    if override:
+        return override
+    for candidate in (APP_DIR / "VERSION", APP_DIR.parent / "VERSION"):
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return "dev"
+
+
+APP_VERSION = _read_version()
 
 
 def _configured_port() -> int:
@@ -279,6 +298,7 @@ async def health(_: web.Request) -> web.Response:
         {
             "ok": True,
             "service": "lumadesk",
+            "version": APP_VERSION,
             "runtime": RUNTIME_MODE,
             "time": datetime.now(timezone.utc).isoformat(),
         }
@@ -330,6 +350,7 @@ async def session_info(request: web.Request) -> web.Response:
             "host": socket.gethostname(),
             "demo": DEMO_MODE,
             "runtime": RUNTIME_MODE,
+            "version": APP_VERSION,
         }
     )
 
@@ -529,17 +550,16 @@ async def delete_entry(request: web.Request) -> web.Response:
     source = resolve_home(request.query.get("path"))
     if source == HOME_ROOT:
         raise web.HTTPForbidden(reason="Cannot delete the workspace root")
-    trash = HOME_ROOT / ".local" / "share" / "Trash" / "files"
-    trash.mkdir(parents=True, exist_ok=True)
-    own(trash)
+    files, info = trash_directories()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = trash / f"{stamp}-{source.name}"
+    target = files / f"{stamp}-{source.name}"
     counter = 1
     while target.exists():
-        target = trash / f"{stamp}-{counter}-{source.name}"
+        target = files / f"{stamp}-{counter}-{source.name}"
         counter += 1
     source.rename(target)
-    return json_response({"ok": True, "trashed": True})
+    _write_trash_info(info, target.name, source)
+    return json_response({"ok": True, "trashed": True, "name": target.name})
 
 
 def unique_destination(folder: Path, name: str) -> Path:
@@ -578,6 +598,145 @@ async def upload_files(request: web.Request) -> web.Response:
     if not uploaded:
         raise web.HTTPBadRequest(reason="No files were supplied")
     return json_response({"ok": True, "files": uploaded}, 201)
+
+
+# Trash: a FreeDesktop-style `~/.local/share/Trash` with `files/` payloads and
+# `info/*.trashinfo` sidecars so the browser can list, restore, and purge items.
+def trash_directories() -> tuple[Path, Path]:
+    files = HOME_ROOT / ".local" / "share" / "Trash" / "files"
+    info = HOME_ROOT / ".local" / "share" / "Trash" / "info"
+    for folder in (files, info):
+        folder.mkdir(parents=True, exist_ok=True)
+        own(folder)
+    return files, info
+
+
+def trash_info_path(info_dir: Path, name: str) -> Path:
+    return info_dir / f"{name}.trashinfo"
+
+
+def _write_trash_info(info_dir: Path, name: str, original: Path) -> None:
+    relative = original.relative_to(HOME_ROOT).as_posix()
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body = f"[Trash Info]\nPath={quote(relative, safe='/')}\nDeletionDate={stamp}\n"
+    target = trash_info_path(info_dir, name)
+    target.write_text(body, encoding="utf-8")
+    os.chmod(target, 0o644)
+    own(target)
+
+
+def _read_trash_info(info_dir: Path, name: str) -> dict[str, Any]:
+    try:
+        raw = trash_info_path(info_dir, name).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    result: dict[str, Any] = {}
+    for line in raw.splitlines():
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key == "Path":
+            result["path"] = unquote(value.strip())
+        elif key == "DeletionDate":
+            try:
+                result["deleted"] = int(datetime.fromisoformat(value.strip()).timestamp())
+            except ValueError:
+                continue
+    return result
+
+
+def trash_entry(files_dir: Path, name: str) -> Path:
+    """Resolve a Trash payload by its stored name, staying inside the Trash."""
+    safe = safe_name(name)
+    entry = files_dir / safe
+    if not entry.exists() and not entry.is_symlink():
+        raise web.HTTPNotFound(reason="That Trash item no longer exists")
+    return entry
+
+
+def _remove_tree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
+
+
+def _trash_display_name(stored: str, meta: dict[str, Any]) -> str:
+    if meta.get("path"):
+        return Path(meta["path"]).name or stored
+    # Entries created before sidecars existed keep their `stamp-name` prefix.
+    return TRASH_STAMP_RE.sub("", stored) or stored
+
+
+async def list_trash(_: web.Request) -> web.Response:
+    files_dir, info_dir = trash_directories()
+    entries: list[dict[str, Any]] = []
+    total = 0
+    try:
+        scan = list(os.scandir(files_dir))
+    except PermissionError:
+        raise web.HTTPForbidden(reason="Permission denied")
+    for item in scan:
+        try:
+            stat = item.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        meta = _read_trash_info(info_dir, item.name)
+        total += stat.st_size
+        entries.append(
+            {
+                "name": item.name,
+                "label": _trash_display_name(item.name, meta),
+                "original": f"/{meta['path']}" if meta.get("path") else None,
+                "type": "directory" if item.is_dir(follow_symlinks=False) else "file",
+                "size": stat.st_size,
+                "deleted": meta.get("deleted") or int(stat.st_mtime),
+            }
+        )
+    entries.sort(key=lambda entry: (entry["deleted"], entry["name"]), reverse=True)
+    return json_response({"ok": True, "count": len(entries), "size": total, "entries": entries})
+
+
+async def restore_trash(request: web.Request) -> web.Response:
+    data = await request.json()
+    files_dir, info_dir = trash_directories()
+    entry = trash_entry(files_dir, str(data.get("name", "")))
+    meta = _read_trash_info(info_dir, entry.name)
+    relative = (meta.get("path") or _trash_display_name(entry.name, meta)).lstrip("/")
+    if not relative or any(part in {"", ".."} for part in Path(relative).parts):
+        raise web.HTTPBadRequest(reason="The recorded Trash location is not valid")
+    parent = HOME_ROOT / Path(relative).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    own(parent)
+    destination = unique_destination(parent, Path(relative).name)
+    if not _within_home(destination):
+        raise web.HTTPForbidden(reason="Path leaves the workspace")
+    entry.rename(destination)
+    own(destination)
+    trash_info_path(info_dir, entry.name).unlink(missing_ok=True)
+    return json_response({"ok": True, "name": destination.name, "path": client_path(destination)})
+
+
+async def purge_trash(request: web.Request) -> web.Response:
+    data = await request.json()
+    files_dir, info_dir = trash_directories()
+    entry = trash_entry(files_dir, str(data.get("name", "")))
+    _remove_tree(entry)
+    trash_info_path(info_dir, entry.name).unlink(missing_ok=True)
+    return json_response({"ok": True, "name": entry.name})
+
+
+async def empty_trash(_: web.Request) -> web.Response:
+    files_dir, info_dir = trash_directories()
+    removed = 0
+    for item in list(os.scandir(files_dir)):
+        try:
+            _remove_tree(Path(item.path))
+            removed += 1
+        except OSError as exc:
+            LOG.warning("Could not purge %s from the Trash: %s", item.name, exc)
+    for meta in list(info_dir.glob("*.trashinfo")):
+        meta.unlink(missing_ok=True)
+    return json_response({"ok": True, "removed": removed})
 
 
 async def run_command(*args: str, timeout: float = 12) -> tuple[int, str, str]:
@@ -910,6 +1069,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/files/rename", rename_entry)
     app.router.add_delete("/api/file", delete_entry)
     app.router.add_post("/api/files/upload", upload_files)
+    app.router.add_get("/api/trash", list_trash)
+    app.router.add_post("/api/trash/restore", restore_trash)
+    app.router.add_post("/api/trash/purge", purge_trash)
+    app.router.add_post("/api/trash/empty", empty_trash)
     app.router.add_get("/api/services", service_list)
     app.router.add_post("/api/services/{unit}/{action}", service_action)
     app.router.add_get("/api/services/{unit}/logs", service_logs)

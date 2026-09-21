@@ -17,6 +17,9 @@
     search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>',
     save: '<svg viewBox="0 0 24 24"><path d="M5 4h12l2 2v14H5V4Zm3 0v6h8V4M8 20v-7h8v7"/></svg>',
     download: '<svg viewBox="0 0 24 24"><path d="M12 4v12m-5-5 5 5 5-5M5 20h14"/></svg>',
+    trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>',
+    restore: '<svg viewBox="0 0 24 24"><path d="M4 13a8 8 0 1 0 2.3-5.7M4 5v6h6"/></svg>',
+    eye: '<svg viewBox="0 0 24 24"><path d="M2 12s3.7-6.2 10-6.2S22 12 22 12s-3.7 6.2-10 6.2S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></svg>',
     close: '<svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>'
   }[name] || '');
 
@@ -114,6 +117,33 @@
         event.preventDefault();
         done(field ? field.value.trim() : true);
       });
+    });
+  }
+
+  function closeContextMenu() {
+    const menu = $('.context-menu');
+    if (menu) menu.remove();
+  }
+
+  function showContextMenu(x, y, items) {
+    closeContextMenu();
+    const visible = items.filter(Boolean);
+    if (!visible.length) return;
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.innerHTML = visible.map(item => item.separator
+      ? '<span class="menu-sep"></span>'
+      : `<button class="menu-item${item.danger ? ' danger' : ''}" data-id="${attr(item.id)}">${item.icon ? svg(item.icon) : ''}<span>${esc(item.label)}</span>${item.hint ? `<kbd>${esc(item.hint)}</kbd>` : ''}</button>`).join('');
+    $('#desktop').append(menu);
+    const box = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(6, Math.min(x, innerWidth - box.width - 8))}px`;
+    menu.style.top = `${Math.max(6, Math.min(y, innerHeight - box.height - 8))}px`;
+    menu.addEventListener('click', event => {
+      const button = event.target.closest('.menu-item');
+      if (!button) return;
+      const item = visible.find(candidate => candidate.id === button.dataset.id);
+      closeContextMenu();
+      item?.action?.();
     });
   }
 
@@ -339,6 +369,8 @@
   }
 
   // Files app
+  const TRASH_PATH = '@trash';
+
   function filesMarkup() {
     return `<div class="files-shell">
       <aside class="files-sidebar">
@@ -347,33 +379,50 @@
         <button class="place-button" data-path="/Desktop"><span class="place-icon">▣</span>Desktop</button>
         <button class="place-button" data-path="/Documents"><span class="place-icon">▤</span>Documents</button>
         <button class="place-button" data-path="/Downloads"><span class="place-icon">⇣</span>Downloads</button>
+        <button class="place-button" data-path="/Projects"><span class="place-icon">◈</span>Projects</button>
+        <div class="sidebar-label">System</div>
+        <button class="place-button" data-path="${TRASH_PATH}"><span class="place-icon">⌫</span>Trash</button>
         <div class="sidebar-label">Storage</div>
-        <button class="place-button" data-path="/"><span class="place-icon">◉</span>Workspace</button>
+        <div class="files-storage"><div class="storage-track"><i class="storage-bar"></i></div><span class="storage-text">Measuring…</span></div>
       </aside>
       <section class="files-main">
         <div class="app-toolbar files-toolbar">
           <div class="nav-group"><button class="tool-button icon-tool file-back" title="Back">${svg('back')}</button><button class="tool-button icon-tool file-up" title="Parent">${svg('up')}</button><button class="tool-button icon-tool file-refresh" title="Refresh">${svg('refresh')}</button></div>
           <div class="breadcrumb"></div>
-          <button class="tool-button file-new">${svg('plus')} New</button><button class="tool-button file-upload">${svg('upload')} Upload</button>
+          <button class="tool-button icon-tool file-hidden" title="Toggle hidden files">${svg('eye')}</button>
+          <button class="tool-button file-new">${svg('plus')} New</button>
+          <button class="tool-button file-upload">${svg('upload')} Upload</button>
+          <button class="tool-button danger file-empty hidden">${svg('trash')} Empty Trash</button>
         </div>
         <div class="files-grid"><div class="app-empty"><div><div class="spinner"></div><p>Opening workspace…</p></div></div></div>
-        <div class="files-status"><span class="file-count">—</span><span>Home volume</span></div>
+        <div class="files-status"><span class="file-count">—</span><span class="files-context">Home volume</span></div>
       </section>
     </div>`;
   }
 
   function mountFiles(win) {
-    const local = {path: '/', history: [], index: -1, entries: [], selected: null};
+    const local = {
+      path: '/', history: [], index: -1, entries: [], trash: [], selected: null,
+      showHidden: localStorage.getItem('lumadesk.showHidden') === '1'
+    };
     win._fileState = local;
     const grid = $('.files-grid', win);
+    const main = $('.files-main', win);
+    const inTrash = () => local.path === TRASH_PATH;
 
     const renderBreadcrumb = () => {
+      if (inTrash()) { $('.breadcrumb', win).innerHTML = `<span data-path="${TRASH_PATH}">Trash</span>`; return; }
       const parts = local.path.split('/').filter(Boolean);
       let current = '';
       $('.breadcrumb', win).innerHTML = `<span data-path="/">Home</span>` + parts.map(part => {
         current += `/${part}`;
         return `<i>›</i><span data-path="${attr(current)}">${esc(part)}</span>`;
       }).join('');
+    };
+
+    const setStatus = (count, context) => {
+      $('.file-count', win).textContent = count;
+      $('.files-context', win).textContent = context;
     };
 
     const renderEntries = () => {
@@ -388,83 +437,239 @@
           </button>`;
         }).join('');
       }
-      $('.file-count', win).textContent = `${local.entries.length} item${local.entries.length === 1 ? '' : 's'}`;
+      const hidden = local.entries.filter(item => item.hidden).length;
+      setStatus(`${local.entries.length} item${local.entries.length === 1 ? '' : 's'}`, hidden ? `Home volume · ${hidden} hidden shown` : 'Home volume');
+    };
+
+    const renderTrash = () => {
+      if (!local.trash.length) {
+        grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><strong>Trash is empty</strong><p>Items you move to Trash wait here for 30 days before the maintenance timer purges them.</p></div></div>`;
+      } else {
+        grid.innerHTML = `<div class="trash-view">${local.trash.map(item => {
+          const folder = item.type === 'directory';
+          const extension = folder ? '' : (item.label.split('.').pop() || 'file').slice(0, 5);
+          return `<div class="trash-row" data-name="${attr(item.name)}">
+            <span class="file-glyph ${folder ? 'folder' : ''}" data-ext="${esc(extension)}"></span>
+            <div class="trash-meta"><strong>${esc(item.label)}</strong><span>${item.original ? `from ${esc(item.original)} · ` : ''}deleted ${esc(timeAgo(item.deleted))} · ${formatBytes(item.size)}</span></div>
+            <div class="trash-actions"><button class="row-action restore">Restore</button><button class="row-action purge">Delete</button></div>
+          </div>`;
+        }).join('')}</div>`;
+      }
+      const total = local.trash.reduce((sum, item) => sum + (item.size || 0), 0);
+      setStatus(`${local.trash.length} item${local.trash.length === 1 ? '' : 's'}`, local.trash.length ? `${formatBytes(total)} awaiting restore` : 'Nothing to restore');
+    };
+
+    const syncToolbar = () => {
+      $('.file-new', win).classList.toggle('hidden', inTrash());
+      $('.file-upload', win).classList.toggle('hidden', inTrash());
+      $('.file-hidden', win).classList.toggle('hidden', inTrash());
+      $('.file-hidden', win).classList.toggle('primary', local.showHidden);
+      $('.file-empty', win).classList.toggle('hidden', !inTrash());
+      $('.file-back', win).disabled = inTrash() || local.index <= 0;
+      $('.file-up', win).disabled = inTrash();
+      $$('.place-button', win).forEach(button => button.classList.toggle('active', button.dataset.path === local.path));
+    };
+
+    const loadTrash = async () => {
+      local.path = TRASH_PATH;
+      local.selected = null;
+      grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><div class="spinner"></div><p>Reading Trash…</p></div></div>`;
+      syncToolbar();
+      const data = await api('/api/trash');
+      local.trash = data.entries;
+      local.entries = [];
+      renderBreadcrumb(); renderTrash(); syncToolbar();
     };
 
     const load = async (path = local.path, addHistory = true) => {
+      if (path === TRASH_PATH) return loadTrash();
       grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><div class="spinner"></div><p>Loading…</p></div></div>`;
-      const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
+      const extra = local.showHidden ? '&hidden=1' : '';
+      const data = await api(`/api/files?path=${encodeURIComponent(path)}${extra}`);
       local.path = data.path; local.entries = data.entries; local.selected = null;
       if (addHistory && local.history[local.index] !== local.path) {
         local.history = local.history.slice(0, local.index + 1); local.history.push(local.path); local.index++;
       }
-      renderBreadcrumb(); renderEntries();
-      $('.file-back', win).disabled = local.index <= 0;
-      $('.file-up', win).disabled = !data.parent;
-      $$('.place-button', win).forEach(button => button.classList.toggle('active', button.dataset.path === local.path));
+      renderBreadcrumb(); renderEntries(); syncToolbar();
     };
     local.load = load;
 
-    grid.addEventListener('click', event => {
-      const entry = event.target.closest('.file-entry');
-      if (!entry) { local.selected = null; $$('.file-entry', grid).forEach(e => e.classList.remove('selected')); return; }
-      $$('.file-entry', grid).forEach(e => e.classList.remove('selected'));
-      entry.classList.add('selected'); local.selected = unattr(entry.dataset.path);
-    });
-    grid.addEventListener('dblclick', event => {
-      const entry = event.target.closest('.file-entry'); if (!entry) return;
-      const path = unattr(entry.dataset.path);
-      if (entry.dataset.type === 'directory') load(path);
-      else openEditor(path);
-    });
-    grid.addEventListener('contextmenu', async event => {
-      const entry = event.target.closest('.file-entry'); if (!entry) return;
-      event.preventDefault();
-      local.selected = unattr(entry.dataset.path);
-      const choice = await showDialog({title: 'File action', message: 'Type “rename” or “delete” for the selected item.', input: {placeholder: 'rename or delete'}, confirm: 'Continue'});
-      if (choice === 'rename') renameSelected();
-      if (choice === 'delete') deleteSelected();
-    });
-    $('.breadcrumb', win).addEventListener('click', event => { const crumb = event.target.closest('[data-path]'); if (crumb) load(unattr(crumb.dataset.path)); });
-    $$('.place-button', win).forEach(button => button.addEventListener('click', () => load(button.dataset.path)));
-    $('.file-back', win).addEventListener('click', () => { if (local.index > 0) { local.index--; load(local.history[local.index], false); } });
-    $('.file-up', win).addEventListener('click', () => { const parent = local.path.split('/').slice(0, -1).join('/') || '/'; load(parent); });
-    $('.file-refresh', win).addEventListener('click', () => load(local.path, false));
-    $('.file-new', win).addEventListener('click', async () => {
-      const name = await showDialog({title: 'Create an item', message: 'Add a trailing slash to create a folder.', input: {placeholder: 'notes.txt or Projects/'}, confirm: 'Create'});
-      if (!name) return;
-      const isFolder = name.endsWith('/');
+    const selectEntry = element => {
+      $$('.file-entry', grid).forEach(node => node.classList.remove('selected'));
+      if (element) { element.classList.add('selected'); local.selected = unattr(element.dataset.path); }
+      else local.selected = null;
+    };
+
+    const openPath = path => {
+      const entry = local.entries.find(item => item.path === path);
+      if (entry && entry.type === 'directory') load(path); else openEditor(path);
+    };
+
+    async function createEntry({title, message, placeholder, confirm, kind = null}) {
+      const raw = await showDialog({title, message, input: {placeholder}, confirm});
+      if (!raw) return;
+      const folder = kind === 'directory' || (kind === null && raw.endsWith('/'));
+      const name = kind === null && folder ? raw.slice(0, -1) : raw;
       try {
-        await api('/api/files/create', {method: 'POST', body: {parent: local.path, name: isFolder ? name.slice(0, -1) : name, type: isFolder ? 'directory' : 'file'}});
-        toast('Created', `${name} was added to this folder.`); await load(local.path, false);
+        await api('/api/files/create', {method: 'POST', body: {parent: local.path, name, type: folder ? 'directory' : 'file'}});
+        toast('Created', `${name} was added to this folder.`);
+        await load(local.path, false);
       } catch (error) { toast('Could not create item', error.message, 'error'); }
-    });
-    $('.file-upload', win).addEventListener('click', () => {
-      state.uploadTarget = async files => {
-        const form = new FormData(); [...files].forEach(file => form.append('file', file));
-        try { await api(`/api/files/upload?path=${encodeURIComponent(local.path)}`, {method:'POST', body: form}); toast('Upload complete', `${files.length} file${files.length === 1 ? '' : 's'} added.`); await load(local.path, false); }
-        catch (error) { toast('Upload failed', error.message, 'error'); }
-      };
-      $('#upload-input').click();
-    });
+    }
+
+    async function uploadFiles(files) {
+      const list = [...files];
+      if (!list.length) return;
+      const form = new FormData();
+      list.forEach(file => form.append('file', file));
+      try {
+        const result = await api(`/api/files/upload?path=${encodeURIComponent(local.path)}`, {method: 'POST', body: form});
+        toast('Upload complete', `${result.files.length} file${result.files.length === 1 ? '' : 's'} added to ${local.path}.`);
+        await load(local.path, false);
+      } catch (error) { toast('Upload failed', error.message, 'error'); }
+    }
+
+    const pickUpload = () => { state.uploadTarget = files => uploadFiles(files); $('#upload-input').click(); };
+
+    const toggleHidden = async () => {
+      local.showHidden = !local.showHidden;
+      localStorage.setItem('lumadesk.showHidden', local.showHidden ? '1' : '0');
+      await load(local.path, false);
+    };
 
     async function renameSelected() {
       if (!local.selected) return toast('Select an item', 'Choose a file or folder first.', 'error');
       const oldName = local.selected.split('/').pop();
-      const name = await showDialog({title:'Rename item', input:{value:oldName}, confirm:'Rename'});
+      const name = await showDialog({title: 'Rename item', input: {value: oldName}, confirm: 'Rename'});
       if (!name || name === oldName) return;
-      try { await api('/api/files/rename', {method:'POST', body:{path:local.selected,name}}); toast('Renamed', `${oldName} is now ${name}.`); await load(local.path,false); }
-      catch(error){ toast('Rename failed',error.message,'error'); }
+      try { await api('/api/files/rename', {method: 'POST', body: {path: local.selected, name}}); toast('Renamed', `${oldName} is now ${name}.`); await load(local.path, false); }
+      catch (error) { toast('Rename failed', error.message, 'error'); }
     }
+
     async function deleteSelected() {
       if (!local.selected) return toast('Select an item', 'Choose a file or folder first.', 'error');
       const name = local.selected.split('/').pop();
-      const answer = await showDialog({title:`Move ${name} to Trash?`, message:'The item will leave this folder and can be recovered from the hidden Trash directory.', confirm:'Move to Trash', danger:true});
+      const answer = await showDialog({title: `Move ${name} to Trash?`, message: 'The item leaves this folder and stays restorable from the Trash view.', confirm: 'Move to Trash', danger: true});
       if (!answer) return;
-      try { await api(`/api/file?path=${encodeURIComponent(local.selected)}`, {method:'DELETE'}); toast('Moved to Trash', `${name} was removed.`); await load(local.path,false); }
-      catch(error){ toast('Delete failed',error.message,'error'); }
+      try { await api(`/api/file?path=${encodeURIComponent(local.selected)}`, {method: 'DELETE'}); toast('Moved to Trash', `${name} can be restored from Trash.`); await load(local.path, false); }
+      catch (error) { toast('Delete failed', error.message, 'error'); }
     }
+
+    async function restoreEntry(name) {
+      try {
+        const result = await api('/api/trash/restore', {method: 'POST', body: {name}});
+        toast('Restored', `${result.name} returned to ${result.path}.`);
+        await loadTrash();
+      } catch (error) { toast('Restore failed', error.message, 'error'); }
+    }
+
+    async function purgeEntry(name) {
+      const answer = await showDialog({title: 'Delete permanently?', message: 'This removes the item from the Trash and cannot be undone.', confirm: 'Delete forever', danger: true});
+      if (!answer) return;
+      try { await api('/api/trash/purge', {method: 'POST', body: {name}}); toast('Deleted', 'The item was removed permanently.'); await loadTrash(); }
+      catch (error) { toast('Delete failed', error.message, 'error'); }
+    }
+
+    async function emptyTrash() {
+      const answer = await showDialog({title: 'Empty the Trash?', message: `${local.trash.length} item${local.trash.length === 1 ? '' : 's'} will be removed permanently.`, confirm: 'Empty Trash', danger: true});
+      if (!answer) return;
+      try {
+        const result = await api('/api/trash/empty', {method: 'POST', body: {}});
+        toast('Trash emptied', `${result.removed} item${result.removed === 1 ? '' : 's'} removed.`);
+        await loadTrash();
+      } catch (error) { toast('Could not empty Trash', error.message, 'error'); }
+    }
+
     win._renameSelected = renameSelected; win._deleteSelected = deleteSelected;
+
+    grid.addEventListener('click', event => {
+      if (inTrash()) {
+        const row = event.target.closest('.trash-row');
+        if (!row) return;
+        const name = unattr(row.dataset.name);
+        if (event.target.closest('.restore')) return restoreEntry(name);
+        if (event.target.closest('.purge')) return purgeEntry(name);
+        return;
+      }
+      selectEntry(event.target.closest('.file-entry'));
+    });
+    grid.addEventListener('dblclick', event => {
+      if (inTrash()) return;
+      const entry = event.target.closest('.file-entry');
+      if (entry) openPath(unattr(entry.dataset.path));
+    });
+    grid.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      if (inTrash()) {
+        const row = event.target.closest('.trash-row');
+        if (!row) { showContextMenu(event.clientX, event.clientY, [{id: 'empty', icon: 'trash', label: 'Empty Trash', danger: true, action: emptyTrash}]); return; }
+        const name = unattr(row.dataset.name);
+        showContextMenu(event.clientX, event.clientY, [
+          {id: 'restore', icon: 'restore', label: 'Restore', action: () => restoreEntry(name)},
+          {id: 'purge', icon: 'trash', label: 'Delete permanently', danger: true, action: () => purgeEntry(name)}
+        ]);
+        return;
+      }
+      const entry = event.target.closest('.file-entry');
+      selectEntry(entry);
+      if (entry) {
+        const path = unattr(entry.dataset.path);
+        const folder = entry.dataset.type === 'directory';
+        showContextMenu(event.clientX, event.clientY, [
+          {id: 'open', label: folder ? 'Open folder' : 'Open in editor', hint: '↵', action: () => openPath(path)},
+          folder ? null : {id: 'download', icon: 'download', label: 'Download', action: () => downloadPath(path)},
+          {separator: true},
+          {id: 'rename', label: 'Rename', hint: 'F2', action: renameSelected},
+          {id: 'trash', icon: 'trash', label: 'Move to Trash', hint: 'Del', danger: true, action: deleteSelected}
+        ]);
+        return;
+      }
+      showContextMenu(event.clientX, event.clientY, [
+        {id: 'file', icon: 'plus', label: 'New file', action: () => createEntry({title: 'New file', message: 'Give the file a name with its extension.', placeholder: 'notes.txt', confirm: 'Create'}, 'file')},
+        {id: 'folder', icon: 'plus', label: 'New folder', action: () => createEntry({title: 'New folder', message: 'Give the folder a name.', placeholder: 'Projects', confirm: 'Create'}, 'directory')},
+        {id: 'upload', icon: 'upload', label: 'Upload files', action: pickUpload},
+        {separator: true},
+        {id: 'hidden', icon: 'eye', label: local.showHidden ? 'Hide dotfiles' : 'Show hidden files', action: toggleHidden}
+      ]);
+    });
+    $('.breadcrumb', win).addEventListener('click', event => { const crumb = event.target.closest('[data-path]'); if (crumb) load(unattr(crumb.dataset.path)); });
+    $$('.place-button', win).forEach(button => button.addEventListener('click', () => load(button.dataset.path)));
+    $('.file-back', win).addEventListener('click', () => { if (local.index > 0) { local.index--; load(local.history[local.index], false); } });
+    $('.file-up', win).addEventListener('click', () => { if (!inTrash()) load(local.path.split('/').slice(0, -1).join('/') || '/', false); });
+    $('.file-refresh', win).addEventListener('click', () => load(local.path, false));
+    $('.file-new', win).addEventListener('click', () => createEntry({title: 'Create an item', message: 'Add a trailing slash to create a folder.', placeholder: 'notes.txt or Projects/', confirm: 'Create'}));
+    $('.file-upload', win).addEventListener('click', pickUpload);
+    $('.file-hidden', win).addEventListener('click', toggleHidden);
+    $('.file-empty', win).addEventListener('click', emptyTrash);
+
+    let dragDepth = 0;
+    const dragging = event => !inTrash() && [...(event.dataTransfer?.types || [])].includes('Files');
+    main.addEventListener('dragover', event => { if (dragging(event)) event.preventDefault(); });
+    main.addEventListener('dragenter', event => { if (!dragging(event)) return; event.preventDefault(); dragDepth++; main.classList.add('drop-active'); });
+    main.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) main.classList.remove('drop-active'); });
+    main.addEventListener('drop', event => {
+      if (!dragging(event)) return;
+      event.preventDefault(); dragDepth = 0; main.classList.remove('drop-active');
+      uploadFiles(event.dataTransfer.files);
+    });
+
+    const onKey = event => {
+      if (state.activeWindow !== win || win.classList.contains('minimized') || inTrash()) return;
+      if (event.target.closest('input, textarea')) return;
+      if (event.key === 'F2' && local.selected) { event.preventDefault(); renameSelected(); }
+      else if (event.key === 'Delete' && local.selected) { event.preventDefault(); deleteSelected(); }
+      else if (event.key === 'Enter' && local.selected) { event.preventDefault(); openPath(local.selected); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    api('/api/system').then(data => {
+      const disk = data.system.disk;
+      $('.storage-bar', win).style.width = `${Math.round(disk.percent)}%`;
+      $('.storage-text', win).textContent = `${formatBytes(disk.used)} of ${formatBytes(disk.total)}`;
+    }).catch(() => { $('.storage-text', win).textContent = 'Workspace volume'; });
+
+    win._cleanup = () => { document.removeEventListener('keydown', onKey); closeContextMenu(); };
+    syncToolbar();
     load('/');
   }
 
@@ -484,7 +689,7 @@
     if (!window.Terminal || !window.FitAddon) throw new Error('Terminal assets did not load');
     const terminal = new window.Terminal({
       cursorBlink: true, cursorStyle: 'bar', fontFamily: 'SFMono-Regular, Cascadia Code, Liberation Mono, monospace',
-      fontSize: 12, lineHeight: 1.25, scrollback: 5000, allowTransparency: true,
+      fontSize: Number(localStorage.getItem('lumadesk.termFont')) || 12, lineHeight: 1.25, scrollback: 5000, allowTransparency: true,
       theme: {background:'#090e15', foreground:'#cbd5df', cursor:'#79e6c6', cursorAccent:'#090e15', selectionBackground:'#2a5f5b88', black:'#111820', red:'#f0787f', green:'#74d9af', yellow:'#e5c07b', blue:'#74a8e8', magenta:'#b28ade', cyan:'#67d2ce', white:'#dce3ea', brightBlack:'#536070', brightRed:'#ff8d93', brightGreen:'#8ce9c3', brightYellow:'#f0d08c', brightBlue:'#8bbaff', brightMagenta:'#c49bf4', brightCyan:'#83e8df', brightWhite:'#f5f7fa'}
     });
     const fit = new window.FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(container);
@@ -653,7 +858,17 @@
   }
   function mountWelcome(win){$('.welcome-terminal',win).addEventListener('click',()=>openApp('terminal'));$('.welcome-files',win).addEventListener('click',()=>openApp('files'));$$('.feature-card',win).forEach(card=>card.addEventListener('click',()=>openApp(card.dataset.app)));}
 
-  function settingsMarkup(){return `<div class="settings-shell"><aside class="settings-nav"><div class="settings-profile"><div class="avatar">W</div><div><strong>${esc(state.session.user)}</strong><span>${esc(state.session.host)}</span></div></div><button class="active">◐ Appearance</button><button>⌨ Workspace</button><button>◎ About</button></aside><section class="settings-content"><h2>Appearance</h2><p>Personalize this browser. Preferences are stored locally on this device.</p><div class="setting-group"><div class="setting-row"><div><strong>Accent color</strong><small>Used for controls, indicators, and charts</small></div><div class="accent-choices"><button class="accent-choice" style="--choice:#72e6c1" data-color="#72e6c1" data-rgb="114,230,193"></button><button class="accent-choice" style="--choice:#77a8ff" data-color="#77a8ff" data-rgb="119,168,255"></button><button class="accent-choice" style="--choice:#b491ff" data-color="#b491ff" data-rgb="180,145,255"></button><button class="accent-choice" style="--choice:#ff9b7b" data-color="#ff9b7b" data-rgb="255,155,123"></button></div></div><div class="setting-row"><div><strong>Wallpaper mood</strong><small>Adjust the desktop atmosphere</small></div><div class="wallpaper-choices"><button class="wallpaper-choice" data-paper="aurora" style="--paper:linear-gradient(145deg,#183d43,#26325a,#121721)"></button><button class="wallpaper-choice" data-paper="ocean" style="--paper:linear-gradient(145deg,#123f53,#0a1b32)"></button><button class="wallpaper-choice" data-paper="ember" style="--paper:linear-gradient(145deg,#4c2434,#21162f)"></button></div></div><div class="setting-row"><div><strong>Reduce motion</strong><small>Minimize interface animation and transitions</small></div><button class="switch motion-switch" aria-label="Reduce motion"></button></div></div><h2 style="margin-top:25px">About this system</h2><div class="setting-group"><div class="setting-row"><div class="about-logo"><div class="brand-symbol"><span></span><span></span><span></span></div><div><strong>LumaDesk OS 1.0.1</strong><small>${state.session?.runtime === 'systemd' ? 'Docker web workspace · systemd edition' : 'Docker web workspace · compatibility edition'}</small></div></div></div><div class="setting-row"><div><strong>Security model</strong><small>Authenticated session · CSRF protection · workspace-scoped files</small></div><span class="state-pill enabled">Protected</span></div><div class="setting-row"><div><strong>Session</strong><small>Sign out and close all open application windows</small></div><button class="tool-button settings-logout">Sign out</button></div></div></section></div>`;}
+  function settingsMarkup(){
+    const session = state.session || {};
+    const edition = session.runtime === 'systemd' ? 'Docker web workspace · systemd edition' : 'Docker web workspace · compatibility edition';
+    const termFont = Number(localStorage.getItem('lumadesk.termFont')) || 12;
+    const showHidden = localStorage.getItem('lumadesk.showHidden') === '1';
+    return `<div class="settings-shell"><aside class="settings-nav"><div class="settings-profile"><div class="avatar">${esc((session.user || 'w').charAt(0).toUpperCase())}</div><div><strong>${esc(session.user || 'webos')}</strong><span>${esc(session.host || location.hostname)}</span></div></div><button class="active" data-page="appearance">◐ Appearance</button><button data-page="workspace">⌨ Workspace</button><button data-page="about">◎ About</button></aside><section class="settings-content">
+      <div class="settings-page active" data-page="appearance"><h2>Appearance</h2><p>Personalize this browser. Preferences are stored locally on this device.</p><div class="setting-group"><div class="setting-row"><div><strong>Accent color</strong><small>Used for controls, indicators, and charts</small></div><div class="accent-choices"><button class="accent-choice" style="--choice:#72e6c1" data-color="#72e6c1" data-rgb="114,230,193"></button><button class="accent-choice" style="--choice:#77a8ff" data-color="#77a8ff" data-rgb="119,168,255"></button><button class="accent-choice" style="--choice:#b491ff" data-color="#b491ff" data-rgb="180,145,255"></button><button class="accent-choice" style="--choice:#ff9b7b" data-color="#ff9b7b" data-rgb="255,155,123"></button></div></div><div class="setting-row"><div><strong>Wallpaper mood</strong><small>Adjust the desktop atmosphere</small></div><div class="wallpaper-choices"><button class="wallpaper-choice" data-paper="aurora" style="--paper:linear-gradient(145deg,#183d43,#26325a,#121721)"></button><button class="wallpaper-choice" data-paper="ocean" style="--paper:linear-gradient(145deg,#123f53,#0a1b32)"></button><button class="wallpaper-choice" data-paper="ember" style="--paper:linear-gradient(145deg,#4c2434,#21162f)"></button></div></div><div class="setting-row"><div><strong>Reduce motion</strong><small>Minimize interface animation and transitions</small></div><button class="switch motion-switch" aria-label="Reduce motion"></button></div></div></div>
+      <div class="settings-page" data-page="workspace"><h2>Workspace</h2><p>Defaults for the Files and Terminal apps on this device.</p><div class="setting-group"><div class="setting-row"><div><strong>Show hidden files</strong><small>Display dotfiles as soon as the Files app opens</small></div><button class="switch hidden-switch ${showHidden ? 'on' : ''}" aria-label="Show hidden files"></button></div><div class="setting-row"><div><strong>Terminal font size</strong><small>Applied to Terminal windows opened from now on</small></div><div class="segmented">${[11, 12, 13, 14, 16].map(size => `<button class="segment ${size === termFont ? 'active' : ''}" data-size="${size}">${size}</button>`).join('')}</div></div><div class="setting-row"><div><strong>Reset local preferences</strong><small>Clear accent, wallpaper, motion, and workspace defaults</small></div><button class="tool-button danger settings-reset">Reset</button></div></div></div>
+      <div class="settings-page" data-page="about"><h2>About</h2><p>Runtime details for this workspace.</p><div class="setting-group"><div class="setting-row"><div class="about-logo"><div class="brand-symbol"><span></span><span></span><span></span></div><div><strong>LumaDesk OS ${esc(session.version || 'dev')}</strong><small>${edition}</small></div></div></div><div class="setting-row"><div><strong>Session</strong><small>Signed in as ${esc(session.user || 'webos')} on ${esc(session.host || 'this host')}</small></div><span class="state-pill enabled">Active</span></div><div class="setting-row"><div><strong>Security model</strong><small>Authenticated session · CSRF protection · workspace-scoped files</small></div><span class="state-pill enabled">Protected</span></div><div class="setting-row"><div><strong>Sign out</strong><small>Close every open application window and clear the session cookie</small></div><button class="tool-button settings-logout">Sign out</button></div></div></div>
+    </section></div>`;
+  }
 
   function applyPreferences(){
     const color=localStorage.getItem('lumadesk.accent')||'#72e6c1',rgb=localStorage.getItem('lumadesk.accentRgb')||'114,230,193';document.documentElement.style.setProperty('--accent',color);document.documentElement.style.setProperty('--accent-rgb',rgb);
@@ -661,9 +876,28 @@
     const paper=localStorage.getItem('lumadesk.wallpaper')||'aurora',wall=$('.wallpaper');if(wall){wall.dataset.paper=paper;wall.style.background=paper==='ocean'?'radial-gradient(ellipse at 50% 70%,#14475c 0%,#0b2238 38%,#070b13 78%)':paper==='ember'?'radial-gradient(ellipse at 55% 70%,#4a2638 0%,#23162d 40%,#090a12 78%)':'';}
   }
   function mountSettings(win){
+    $$('.settings-nav button[data-page]',win).forEach(button=>button.addEventListener('click',()=>{
+      $$('.settings-nav button[data-page]',win).forEach(node=>node.classList.toggle('active',node===button));
+      $$('.settings-page',win).forEach(page=>page.classList.toggle('active',page.dataset.page===button.dataset.page));
+    }));
     const color=localStorage.getItem('lumadesk.accent')||'#72e6c1';$$('.accent-choice',win).forEach(button=>{button.classList.toggle('active',button.dataset.color===color);button.addEventListener('click',()=>{localStorage.setItem('lumadesk.accent',button.dataset.color);localStorage.setItem('lumadesk.accentRgb',button.dataset.rgb);applyPreferences();$$('.accent-choice',win).forEach(b=>b.classList.toggle('active',b===button));});});
     const paper=localStorage.getItem('lumadesk.wallpaper')||'aurora';$$('.wallpaper-choice',win).forEach(button=>{button.classList.toggle('active',button.dataset.paper===paper);button.addEventListener('click',()=>{localStorage.setItem('lumadesk.wallpaper',button.dataset.paper);applyPreferences();$$('.wallpaper-choice',win).forEach(b=>b.classList.toggle('active',b===button));});});
     const toggle=$('.motion-switch',win);toggle.classList.toggle('on',document.body.classList.contains('reduce-motion'));toggle.addEventListener('click',()=>{const on=localStorage.getItem('lumadesk.reduceMotion')!=='1';localStorage.setItem('lumadesk.reduceMotion',on?'1':'0');applyPreferences();toggle.classList.toggle('on',on);});
+    const hiddenToggle=$('.hidden-switch',win);hiddenToggle.addEventListener('click',()=>{
+      const on=!hiddenToggle.classList.contains('on');
+      hiddenToggle.classList.toggle('on',on);
+      localStorage.setItem('lumadesk.showHidden',on?'1':'0');
+      [...state.windows.values()].filter(node=>node.dataset.app==='files').forEach(node=>node._fileState?.load?.(node._fileState.path,false));
+      toast('Files updated',on?'Hidden files are now visible.':'Dotfiles are hidden again.');
+    });
+    $$('.segmented .segment',win).forEach(button=>button.addEventListener('click',()=>{localStorage.setItem('lumadesk.termFont',button.dataset.size);$$('.segmented .segment',win).forEach(node=>node.classList.toggle('active',node===button));toast('Terminal updated','New Terminal windows use this font size.');}));
+    $('.settings-reset',win).addEventListener('click',async()=>{
+      const answer=await showDialog({title:'Reset preferences?',message:'Accent color, wallpaper, motion, and workspace defaults return to their shipped values.',confirm:'Reset',danger:true});
+      if(!answer)return;
+      Object.keys(localStorage).filter(key=>key.startsWith('lumadesk.')&&key!=='lumadesk.seen').forEach(key=>localStorage.removeItem(key));
+      applyPreferences();
+      toast('Preferences reset','Reopen Settings or reload to see every default.');
+    });
     $('.settings-logout',win).addEventListener('click',signOut);
   }
 
@@ -697,9 +931,9 @@
     $('.menu-actions [data-app]').addEventListener('click',event=>openApp(event.currentTarget.dataset.app));
     $('#focus-toggle').addEventListener('click',event=>{const on=$('#desktop').classList.toggle('focus-mode');event.currentTarget.classList.toggle('active',on);$('small',event.currentTarget).textContent=on?'On':'Off';});
     $('#upload-input').addEventListener('change',event=>{if(event.target.files.length&&state.uploadTarget)state.uploadTarget(event.target.files);event.target.value='';state.uploadTarget=null;});
-    document.addEventListener('pointerdown',event=>{if(!event.target.closest('.panel,.topbar-brand,.status-button,.launcher-button'))hidePanels();});
+    document.addEventListener('pointerdown',event=>{if(!event.target.closest('.context-menu'))closeContextMenu();if(!event.target.closest('.panel,.topbar-brand,.status-button,.launcher-button'))hidePanels();},true);
     document.addEventListener('keydown',event=>{
-      if(event.key==='Escape'){hidePanels();return;}
+      if(event.key==='Escape'){closeContextMenu();hidePanels();return;}
       if(event.altKey&&event.key==='F4'){event.preventDefault();if(state.activeWindow)closeWindow(state.activeWindow);}
       if(event.ctrlKey&&event.altKey&&event.key.toLowerCase()==='t'){event.preventDefault();openApp('terminal');}
       if(event.ctrlKey&&!event.altKey&&event.code==='Space'){event.preventDefault();$('[data-command="launcher"]').click();}

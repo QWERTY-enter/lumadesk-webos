@@ -34,6 +34,11 @@ jobs:
           python3 -m py_compile app/server.py
           node --check app/static/app.js
 
+      - name: Run frontend DOM smoke test
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:frontend
+
       - name: Check shell scripts and entrypoint behavior
         run: |
           bash -n scripts/setup.sh scripts/maintenance.sh tests/test_entrypoint.sh

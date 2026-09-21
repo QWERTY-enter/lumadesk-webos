@@ -2,6 +2,27 @@
 
 All notable changes to LumaDesk OS are documented here. Versions follow Semantic Versioning.
 
+## [1.1.0] - 2026-09-20
+
+### Added
+
+- Trash management: deleted items are recorded with FreeDesktop `*.trashinfo` metadata and can be listed, restored, permanently deleted, or emptied from a Trash view in the Files app (`GET /api/trash`, `POST /api/trash/restore|purge|empty`).
+- Right-click context menus in the Files app for Open, Download, Rename, Move to Trash, New file/folder, and Upload.
+- Drag-and-drop uploads onto the Files window, with a highlighted drop target.
+- Files keyboard shortcuts: `Enter` opens, `F2` renames, `Delete` moves to Trash.
+- Hidden-file (dotfile) visibility toggle in the Files toolbar and a matching Settings default.
+- Settings workspace tab with a terminal font-size picker and a local-preference reset; the Settings sidebar tabs are now functional.
+- Workspace storage meter in the Files sidebar, sourced from live disk usage.
+- `/healthz` and `/api/session` now report the packaged application version, which the About page displays.
+- Backend tests for the Trash lifecycle, CSRF protection on Trash routes, and a live PTY terminal session.
+
+### Changed
+
+- The maintenance timer also prunes orphaned `*.trashinfo` sidecars and honors `WEBOS_HOME`.
+- The image ships the `VERSION` file so the runtime reports the real release version.
+- Seeded workspaces now include a `Downloads` folder to match the Files sidebar.
+- Published image, Compose, and setup references point at `1.1.0`.
+
 ## [1.0.1] - 2026-09-20
 
 ### Added
@@ -32,5 +53,6 @@ All notable changes to LumaDesk OS are documented here. Versions follow Semantic
 - Daily systemd maintenance timer and seeded first-run workspace.
 - GitHub Actions CI, GHCR publishing, SBOM, provenance attestation, checksums, and release archives.
 
+[1.1.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.1.0
 [1.0.1]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.0.1
 [1.0.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.0.0
