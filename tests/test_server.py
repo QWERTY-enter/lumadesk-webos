@@ -258,6 +258,10 @@ class StoreTests(ApiTestCase):
         await super().asyncSetUp()
         server.store_registry_path().unlink(missing_ok=True)
 
+    async def asyncTearDown(self):
+        server.store_registry_path().unlink(missing_ok=True)
+        await super().asyncTearDown()
+
     async def job_finished(self, job_id: str) -> dict:
         for _ in range(60):
             job = (await (await self.client.get(f"/api/store/jobs/{job_id}")).json())["job"]
@@ -323,6 +327,78 @@ class StoreTests(ApiTestCase):
         else:
             self.assertEqual(response.status, 409)
             self.assertEqual((await response.json())["error"], message)
+
+    async def with_stub_apt(self, script: str):
+        """Run a store job against a fake apt-get and return the finished job."""
+        with tempfile.TemporaryDirectory() as bindir:
+            stub = Path(bindir) / "apt-get"
+            stub.write_text(script, encoding="utf-8")
+            stub.chmod(0o755)
+            original = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bindir}:{original}"
+            try:
+                entry = server.catalog_entry("htop")
+                job = server._new_store_job(entry["id"], "install")
+                await server._run_store_job(job, entry, "install")
+            finally:
+                os.environ["PATH"] = original
+        return job
+
+    async def test_successful_package_install_records_the_app(self):
+        job = await self.with_stub_apt('#!/bin/sh\necho "stub apt-get $*"\nexit 0\n')
+        self.assertEqual(job["state"], "done", job["log"])
+        self.assertTrue(any("install" in line for line in job["log"]))
+        self.assertIn("htop", server.read_store_registry())
+
+    async def test_failed_index_refresh_does_not_block_the_install(self):
+        script = (
+            '#!/bin/sh\n'
+            'if [ "$1" = "update" ]; then echo "W: mirror unreachable" >&2; exit 100; fi\n'
+            'echo "stub install $*"\n'
+            'exit 0\n'
+        )
+        job = await self.with_stub_apt(script)
+        self.assertEqual(job["state"], "done", job["log"])
+        self.assertTrue(any("continuing with the cached lists" in line for line in job["log"]))
+
+    async def test_failed_index_refresh_does_not_block_the_install(self):
+        calls = []
+
+        async def fake_run_command(*args, timeout=12, extra_env=None):
+            calls.append(args)
+            if args[1] == "update":
+                return 100, "", "W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease"
+            return 0, "Setting up fixture-package (1.0) ...\n", ""
+
+        original = server.run_command
+        server.run_command = fake_run_command
+        self.addCleanup(setattr, server, "run_command", original)
+
+        entry = {"id": "fixture", "type": "package", "packages": ["fixture-package"]}
+        job = server._new_store_job(entry["id"], "install")
+        await server._run_store_job(job, entry, "install")
+
+        self.assertEqual(job["state"], "done", job["log"])
+        self.assertEqual(len(calls), 2, "the install still runs after a failed refresh")
+        self.assertTrue(any("cached lists" in line for line in job["log"]))
+        self.assertIn("fixture", server.read_store_registry())
+
+    async def test_successful_install_records_the_app_in_the_registry(self):
+        async def fake_run_command(*args, timeout=12, extra_env=None):
+            return 0, "Setting up fixture-package (1.0) ...\n", ""
+
+        original = server.run_command
+        server.run_command = fake_run_command
+        self.addCleanup(setattr, server, "run_command", original)
+
+        entry = {"id": "fixture", "type": "package", "packages": ["fixture-package"]}
+        job = server._new_store_job(entry["id"], "install")
+        await server._run_store_job(job, entry, "install")
+
+        self.assertEqual(job["state"], "done")
+        recorded = server.read_store_registry()["fixture"]
+        self.assertEqual(recorded["packages"], ["fixture-package"])
+        self.assertEqual(recorded["type"], "package")
 
     async def test_failed_package_job_keeps_its_log(self):
         supported, _ = server.package_install_status()

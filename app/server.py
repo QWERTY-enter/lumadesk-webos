@@ -1361,6 +1361,14 @@ async def _run_store_job(job: dict[str, Any], entry: dict[str, Any], action: str
                     if tail:
                         job["log"].append(tail[-6000:])
                     if code:
+                        if step[1] == "update":
+                            # A stale or unreachable mirror should not block an install
+                            # that the cached package lists can still satisfy.
+                            job["log"].append(
+                                f"Warning: the package index refresh failed (status {code}); "
+                                "continuing with the cached lists."
+                            )
+                            continue
                         job["state"] = "failed"
                         job["log"].append(f"Command exited with status {code}")
                         return
