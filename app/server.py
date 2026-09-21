@@ -90,6 +90,8 @@ PORT = _configured_port()
 HOST = os.environ.get("WEBOS_HOST", "0.0.0.0")
 MAX_TEXT_FILE = 2 * 1024 * 1024
 MAX_UPLOAD = 25 * 1024 * 1024
+SEARCH_LIMIT = 200
+SEARCH_SCAN_LIMIT = 20_000
 UNIT_RE = re.compile(r"^[A-Za-z0-9_.:@\\-]+\.service$")
 PROTECTED_UNITS = {
     "lumadesk.service",
@@ -444,6 +446,77 @@ async def list_files(request: web.Request) -> web.Response:
             "path": client_path(folder),
             "parent": None if folder == HOME_ROOT else client_path(folder.parent),
             "entries": entries,
+        }
+    )
+
+
+def _scan_workspace(root: Path, needle: str, show_hidden: bool) -> tuple[list[dict[str, Any]], bool]:
+    """Case-insensitive filename search, bounded so a large home cannot stall the API."""
+    needle = needle.casefold()
+    matches: list[dict[str, Any]] = []
+    scanned = 0
+    truncated = False
+    walker = os.walk(root, followlinks=False)
+    for folder, dirnames, filenames in walker:
+        current = Path(folder)
+        if current == HOME_ROOT:
+            # The Trash has its own view; keep it out of search results.
+            dirnames[:] = [name for name in dirnames if name != ".local"]
+        if not show_hidden:
+            dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        dirnames.sort()
+        candidates = [(name, True) for name in dirnames] + [(name, False) for name in sorted(filenames)]
+        for name, is_dir in candidates:
+            if needle not in name.casefold():
+                continue
+            path = current / name
+            try:
+                stat = path.lstat()
+            except OSError:
+                continue
+            matches.append(
+                {
+                    "name": name,
+                    "path": client_path(path),
+                    "folder": client_path(current),
+                    "type": "directory" if is_dir else "file",
+                    "size": stat.st_size,
+                    "modified": int(stat.st_mtime),
+                    "mime": None if is_dir else (mimetypes.guess_type(name)[0] or "application/octet-stream"),
+                }
+            )
+            if len(matches) >= SEARCH_LIMIT:
+                walker.close()
+                return matches, True
+        scanned += len(candidates)
+        if scanned > SEARCH_SCAN_LIMIT:
+            truncated = True
+            break
+    return matches, truncated
+
+
+async def search_files(request: web.Request) -> web.Response:
+    query = (request.query.get("q") or "").strip()
+    if len(query) < 2:
+        raise web.HTTPBadRequest(reason="Search needs at least two characters")
+    if len(query) > 120:
+        raise web.HTTPBadRequest(reason="Search term is too long")
+    root = resolve_home(request.query.get("path", "/"))
+    if not root.is_dir():
+        raise web.HTTPBadRequest(reason="Not a folder")
+    show_hidden = request.query.get("hidden") == "1"
+    try:
+        matches, truncated = await asyncio.to_thread(_scan_workspace, root, query, show_hidden)
+    except PermissionError:
+        raise web.HTTPForbidden(reason="Permission denied")
+    return json_response(
+        {
+            "ok": True,
+            "query": query,
+            "root": client_path(root),
+            "count": len(matches),
+            "truncated": truncated,
+            "matches": matches,
         }
     )
 
@@ -1062,6 +1135,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/processes", process_list)
     app.router.add_post("/api/processes/{pid}/signal", process_signal)
     app.router.add_get("/api/files", list_files)
+    app.router.add_get("/api/files/search", search_files)
     app.router.add_get("/api/file", read_file)
     app.router.add_get("/api/file/raw", raw_file)
     app.router.add_post("/api/files/create", create_entry)

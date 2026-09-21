@@ -199,6 +199,60 @@ class TrashTests(ApiTestCase):
         self.assertEqual(forged.status, 403)
 
 
+class SearchTests(ApiTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.reset_workspace()
+
+    async def search(self, query: str, **params):
+        suffix = "".join(f"&{key}={value}" for key, value in params.items())
+        response = await self.client.get(f"/api/files/search?q={query}{suffix}")
+        return response
+
+    async def test_search_finds_nested_matches_and_skips_the_trash(self):
+        self.write("Documents/notes.txt")
+        self.write("Projects/deep/notes-inner.md")
+        self.write("Documents/other.md")
+        self.write(".local/share/Trash/files/20260101-000000-notes.txt", "trashed")
+
+        body = await (await self.search("notes")).json()
+        self.assertEqual(sorted(match["path"] for match in body["matches"]), ["/Documents/notes.txt", "/Projects/deep/notes-inner.md"])
+        self.assertEqual(body["count"], 2)
+        self.assertFalse(body["truncated"])
+
+        # Even with dotfiles visible, the Trash keeps its own view.
+        hidden = await (await self.search("notes", hidden=1)).json()
+        self.assertNotIn("/.local/share/Trash/files/20260101-000000-notes.txt", [match["path"] for match in hidden["matches"]])
+
+    async def test_search_is_case_insensitive_and_scoped_to_the_root(self):
+        self.write("Documents/Report.TXT")
+        self.write("Projects/report.md")
+        body = await (await self.search("REPORT", path="/Documents")).json()
+        self.assertEqual([match["path"] for match in body["matches"]], ["/Documents/Report.TXT"])
+        self.assertEqual(body["root"], "/Documents")
+
+    async def test_short_and_oversized_queries_are_rejected(self):
+        self.assertEqual((await self.search("")).status, 400)
+        self.assertEqual((await self.search("a")).status, 400)
+        self.assertEqual((await self.search("x" * 121)).status, 400)
+
+    async def test_results_are_capped_and_reported_as_truncated(self):
+        for index in range(12):
+            self.write(f"Projects/spam-{index:02d}.log")
+        original = server.SEARCH_LIMIT
+        self.addCleanup(setattr, server, "SEARCH_LIMIT", original)
+        server.SEARCH_LIMIT = 5
+        body = await (await self.search("spam")).json()
+        self.assertEqual(body["count"], 5)
+        self.assertTrue(body["truncated"])
+
+    async def test_search_requires_authentication(self):
+        anonymous = TestClient(TestServer(server.create_app()))
+        await anonymous.start_server()
+        self.addAsyncCleanup(anonymous.close)
+        self.assertEqual((await anonymous.get("/api/files/search?q=notes")).status, 401)
+
+
 class TerminalSocketTests(ApiTestCase):
     async def test_terminal_streams_a_real_shell(self):
         if not shutil.which("bash"):

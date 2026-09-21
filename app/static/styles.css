@@ -251,3 +251,27 @@ body.reduce-motion *{animation-duration:.001ms!important;animation-iteration-cou
 .segment{min-width:27px;height:23px;border:0;border-radius:6px;color:#8d99ab;background:none;cursor:pointer;font-size:10px}
 .segment:hover{color:#fff;background:rgba(255,255,255,.07)}
 .segment.active{color:#082019;background:var(--accent);font-weight:700}
+
+/* Files search and terminal tabs (1.2.0) */
+.files-search{flex:0 0 auto}
+.files-search input{width:118px}
+.file-search-clear{width:20px;height:20px;padding:0;border:0;background:none}
+.file-search-clear svg{width:12px;height:12px}
+.search-view{grid-column:1/-1;display:flex;flex-direction:column;gap:5px}
+.search-row{display:flex;align-items:center;gap:11px;padding:8px 11px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:rgba(255,255,255,.025);cursor:default}
+.search-row:hover{border-color:rgba(255,255,255,.13);background:rgba(255,255,255,.05)}
+.search-row .file-glyph{width:26px;height:29px;flex:0 0 auto}
+.search-row .file-glyph.folder{width:32px;height:23px;margin-top:0}
+.search-row .file-glyph::after{bottom:5px;font-size:6px}
+.search-row .trash-meta{min-width:0;flex:1}
+.search-row .row-action.trash:hover{color:#ff9aa1;background:rgba(255,90,100,.12)}
+.terminal-tabs{display:flex;min-width:0;flex:1;gap:4px;overflow-x:auto;padding-right:8px;scrollbar-width:none}
+.terminal-tabs::-webkit-scrollbar{display:none}
+.terminal-tabs .terminal-tab{min-width:0;max-width:170px;flex:0 1 auto;border:0;cursor:pointer;color:#8b98ab;background:rgba(255,255,255,.045)}
+.terminal-tabs .terminal-tab:hover{color:#dfe7ef;background:rgba(255,255,255,.09)}
+.terminal-tabs .terminal-tab.active{color:#eafff8;background:rgba(var(--accent-rgb),.16);box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.3)}
+.terminal-tabs .terminal-tab span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab-close{margin-left:2px;padding:0 2px;border-radius:4px;color:#67748a;font:13px/1 var(--font);font-style:normal}
+.tab-close:hover{color:#fff;background:rgba(255,255,255,.14)}
+.terminal-panes{min-height:0;flex:1;display:flex;flex-direction:column}
+.terminal-panes .terminal-container{min-height:0;flex:1}

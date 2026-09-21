@@ -389,6 +389,7 @@
         <div class="app-toolbar files-toolbar">
           <div class="nav-group"><button class="tool-button icon-tool file-back" title="Back">${svg('back')}</button><button class="tool-button icon-tool file-up" title="Parent">${svg('up')}</button><button class="tool-button icon-tool file-refresh" title="Refresh">${svg('refresh')}</button></div>
           <div class="breadcrumb"></div>
+          <div class="search-field files-search">${svg('search')}<input class="file-search" placeholder="Search workspace" autocomplete="off"><button class="tool-button icon-tool file-search-clear hidden" title="Clear search">${svg('close')}</button></div>
           <button class="tool-button icon-tool file-hidden" title="Toggle hidden files">${svg('eye')}</button>
           <button class="tool-button file-new">${svg('plus')} New</button>
           <button class="tool-button file-upload">${svg('upload')} Upload</button>
@@ -402,13 +403,15 @@
 
   function mountFiles(win) {
     const local = {
-      path: '/', history: [], index: -1, entries: [], trash: [], selected: null,
+      path: '/', history: [], index: -1, entries: [], trash: [], results: [], selected: null,
+      query: '', searchTimer: null,
       showHidden: localStorage.getItem('lumadesk.showHidden') === '1'
     };
     win._fileState = local;
     const grid = $('.files-grid', win);
     const main = $('.files-main', win);
     const inTrash = () => local.path === TRASH_PATH;
+    const inSearch = () => local.query.trim().length >= 2;
 
     const renderBreadcrumb = () => {
       if (inTrash()) { $('.breadcrumb', win).innerHTML = `<span data-path="${TRASH_PATH}">Trash</span>`; return; }
@@ -459,15 +462,34 @@
       setStatus(`${local.trash.length} item${local.trash.length === 1 ? '' : 's'}`, local.trash.length ? `${formatBytes(total)} awaiting restore` : 'Nothing to restore');
     };
 
+    const renderSearch = () => {
+      if (!local.results.length) {
+        grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><strong>No matches</strong><p>Nothing in this folder tree is named like “${esc(local.query.trim())}”.</p></div></div>`;
+      } else {
+        grid.innerHTML = `<div class="search-view">${local.results.map(item => {
+          const folder = item.type === 'directory';
+          const extension = folder ? '' : (item.name.split('.').pop() || 'file').slice(0, 5);
+          return `<div class="search-row" data-path="${attr(item.path)}" data-type="${item.type}">
+            <span class="file-glyph ${folder ? 'folder' : ''}" data-ext="${esc(extension)}"></span>
+            <div class="trash-meta"><strong>${esc(item.name)}</strong><span>${esc(item.folder === '/' ? 'Workspace root' : item.folder)} · ${folder ? 'folder' : formatBytes(item.size)} · ${esc(timeAgo(item.modified))}</span></div>
+            <div class="trash-actions"><button class="row-action open">Open</button><button class="row-action trash">Trash</button></div>
+          </div>`;
+        }).join('')}</div>`;
+      }
+      setStatus(`${local.results.length} match${local.results.length === 1 ? '' : 'es'}`, local.truncated ? 'More results exist; refine the search' : `Searching ${local.searchRoot}`);
+    };
+
     const syncToolbar = () => {
-      $('.file-new', win).classList.toggle('hidden', inTrash());
-      $('.file-upload', win).classList.toggle('hidden', inTrash());
+      const busy = inTrash() || inSearch();
+      $('.file-new', win).classList.toggle('hidden', busy);
+      $('.file-upload', win).classList.toggle('hidden', busy);
       $('.file-hidden', win).classList.toggle('hidden', inTrash());
       $('.file-hidden', win).classList.toggle('primary', local.showHidden);
       $('.file-empty', win).classList.toggle('hidden', !inTrash());
-      $('.file-back', win).disabled = inTrash() || local.index <= 0;
-      $('.file-up', win).disabled = inTrash();
-      $$('.place-button', win).forEach(button => button.classList.toggle('active', button.dataset.path === local.path));
+      $('.file-search-clear', win).classList.toggle('hidden', !local.query);
+      $('.file-back', win).disabled = busy || local.index <= 0;
+      $('.file-up', win).disabled = busy;
+      $$('.place-button', win).forEach(button => button.classList.toggle('active', !inSearch() && button.dataset.path === local.path));
     };
 
     const loadTrash = async () => {
@@ -479,6 +501,43 @@
       local.trash = data.entries;
       local.entries = [];
       renderBreadcrumb(); renderTrash(); syncToolbar();
+    };
+
+    const loadSearch = async () => {
+      const query = local.query.trim();
+      if (query.length < 2) return;
+      grid.innerHTML = `<div class="app-empty" style="grid-column:1/-1"><div><div class="spinner"></div><p>Searching…</p></div></div>`;
+      syncToolbar();
+      const extra = local.showHidden ? '&hidden=1' : '';
+      const data = await api(`/api/files/search?q=${encodeURIComponent(query)}&path=${encodeURIComponent(local.path === TRASH_PATH ? '/' : local.path)}${extra}`);
+      local.results = data.matches;
+      local.truncated = data.truncated;
+      local.searchRoot = data.root;
+      local.entries = [];
+      renderSearch(); syncToolbar();
+    };
+    local.loadSearch = loadSearch;
+
+    const clearSearch = () => {
+      clearTimeout(local.searchTimer);
+      local.query = ''; local.results = [];
+      $('.file-search', win).value = '';
+      load(local.path, false);
+    };
+
+    const scheduleSearch = () => {
+      clearTimeout(local.searchTimer);
+      local.searchTimer = setTimeout(() => {
+        local.query = $('.file-search', win).value;
+        if (local.query.trim().length >= 2) loadSearch();
+        else { local.results = []; load(local.path, false); }
+        syncToolbar();
+      }, 220);
+    };
+
+    const openResult = row => {
+      const path = unattr(row.dataset.path);
+      if (row.dataset.type === 'directory') { clearSearch(); load(path); } else openEditor(path);
     };
 
     const load = async (path = local.path, addHistory = true) => {
@@ -551,7 +610,12 @@
       const name = local.selected.split('/').pop();
       const answer = await showDialog({title: `Move ${name} to Trash?`, message: 'The item leaves this folder and stays restorable from the Trash view.', confirm: 'Move to Trash', danger: true});
       if (!answer) return;
-      try { await api(`/api/file?path=${encodeURIComponent(local.selected)}`, {method: 'DELETE'}); toast('Moved to Trash', `${name} can be restored from Trash.`); await load(local.path, false); }
+      try {
+        await api(`/api/file?path=${encodeURIComponent(local.selected)}`, {method: 'DELETE'});
+        toast('Moved to Trash', `${name} can be restored from Trash.`);
+        local.selected = null;
+        if (inSearch()) await loadSearch(); else await load(local.path, false);
+      }
       catch (error) { toast('Delete failed', error.message, 'error'); }
     }
 
@@ -583,6 +647,14 @@
     win._renameSelected = renameSelected; win._deleteSelected = deleteSelected;
 
     grid.addEventListener('click', event => {
+      if (inSearch()) {
+        const row = event.target.closest('.search-row');
+        if (!row) return;
+        const path = unattr(row.dataset.path);
+        if (event.target.closest('.trash')) { local.selected = path; return deleteSelected(); }
+        if (event.target.closest('.open')) return openResult(row);
+        return;
+      }
       if (inTrash()) {
         const row = event.target.closest('.trash-row');
         if (!row) return;
@@ -594,12 +666,28 @@
       selectEntry(event.target.closest('.file-entry'));
     });
     grid.addEventListener('dblclick', event => {
+      if (inSearch()) { const row = event.target.closest('.search-row'); if (row) openResult(row); return; }
       if (inTrash()) return;
       const entry = event.target.closest('.file-entry');
       if (entry) openPath(unattr(entry.dataset.path));
     });
     grid.addEventListener('contextmenu', event => {
       event.preventDefault();
+      if (inSearch()) {
+        const row = event.target.closest('.search-row');
+        if (!row) return;
+        const path = unattr(row.dataset.path);
+        local.selected = path;
+        const folder = row.dataset.type === 'directory';
+        showContextMenu(event.clientX, event.clientY, [
+          {id: 'open', label: folder ? 'Open folder' : 'Open in editor', action: () => openResult(row)},
+          folder ? null : {id: 'download', icon: 'download', label: 'Download', action: () => downloadPath(path)},
+          {separator: true},
+          {id: 'reveal', icon: 'refresh', label: 'Show containing folder', action: () => { clearSearch(); load(path.split('/').slice(0, -1).join('/') || '/'); }},
+          {id: 'trash', icon: 'trash', label: 'Move to Trash', danger: true, action: deleteSelected}
+        ]);
+        return;
+      }
       if (inTrash()) {
         const row = event.target.closest('.trash-row');
         if (!row) { showContextMenu(event.clientX, event.clientY, [{id: 'empty', icon: 'trash', label: 'Empty Trash', danger: true, action: emptyTrash}]); return; }
@@ -641,6 +729,9 @@
     $('.file-upload', win).addEventListener('click', pickUpload);
     $('.file-hidden', win).addEventListener('click', toggleHidden);
     $('.file-empty', win).addEventListener('click', emptyTrash);
+    $('.file-search', win).addEventListener('input', scheduleSearch);
+    $('.file-search', win).addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); clearSearch(); win.focus(); } });
+    $('.file-search-clear', win).addEventListener('click', () => { clearSearch(); $('.file-search', win).focus(); });
 
     let dragDepth = 0;
     const dragging = event => !inTrash() && [...(event.dataTransfer?.types || [])].includes('Files');
@@ -654,7 +745,7 @@
     });
 
     const onKey = event => {
-      if (state.activeWindow !== win || win.classList.contains('minimized') || inTrash()) return;
+      if (state.activeWindow !== win || win.classList.contains('minimized') || inTrash() || inSearch()) return;
       if (event.target.closest('input, textarea')) return;
       if (event.key === 'F2' && local.selected) { event.preventDefault(); renameSelected(); }
       else if (event.key === 'Delete' && local.selected) { event.preventDefault(); deleteSelected(); }
@@ -681,43 +772,136 @@
 
   // Terminal app
   function terminalMarkup() {
-    return `<div class="terminal-shell"><div class="terminal-bar"><div class="terminal-tab"><i></i><span>bash — login shell</span></div><span class="terminal-host">connecting…</span><div class="terminal-actions"><button class="terminal-clear" title="Clear">⌫</button><button class="terminal-reconnect" title="Reconnect">↻</button></div></div><div class="terminal-container"></div></div>`;
+    return `<div class="terminal-shell">
+      <div class="terminal-bar">
+        <div class="terminal-tabs"></div>
+        <span class="terminal-host">connecting…</span>
+        <div class="terminal-actions"><button class="terminal-clear" title="Clear">⌫</button><button class="terminal-reconnect" title="Reconnect">↻</button><button class="terminal-add" title="New tab">+</button></div>
+      </div>
+      <div class="terminal-panes"></div>
+    </div>`;
   }
 
+  const TERMINAL_THEME = {background:'#090e15', foreground:'#cbd5df', cursor:'#79e6c6', cursorAccent:'#090e15', selectionBackground:'#2a5f5b88', black:'#111820', red:'#f0787f', green:'#74d9af', yellow:'#e5c07b', blue:'#74a8e8', magenta:'#b28ade', cyan:'#67d2ce', white:'#dce3ea', brightBlack:'#536070', brightRed:'#ff8d93', brightGreen:'#8ce9c3', brightYellow:'#f0d08c', brightBlue:'#8bbaff', brightMagenta:'#c49bf4', brightCyan:'#83e8df', brightWhite:'#f5f7fa'};
+
   function mountTerminal(win) {
-    const container = $('.terminal-container', win);
     if (!window.Terminal || !window.FitAddon) throw new Error('Terminal assets did not load');
-    const terminal = new window.Terminal({
-      cursorBlink: true, cursorStyle: 'bar', fontFamily: 'SFMono-Regular, Cascadia Code, Liberation Mono, monospace',
-      fontSize: Number(localStorage.getItem('lumadesk.termFont')) || 12, lineHeight: 1.25, scrollback: 5000, allowTransparency: true,
-      theme: {background:'#090e15', foreground:'#cbd5df', cursor:'#79e6c6', cursorAccent:'#090e15', selectionBackground:'#2a5f5b88', black:'#111820', red:'#f0787f', green:'#74d9af', yellow:'#e5c07b', blue:'#74a8e8', magenta:'#b28ade', cyan:'#67d2ce', white:'#dce3ea', brightBlack:'#536070', brightRed:'#ff8d93', brightGreen:'#8ce9c3', brightYellow:'#f0d08c', brightBlue:'#8bbaff', brightMagenta:'#c49bf4', brightCyan:'#83e8df', brightWhite:'#f5f7fa'}
-    });
-    const fit = new window.FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(container);
-    let socket = null; let reconnectTimer = null;
-    const resize = () => { try { fit.fit(); if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type:'resize', rows:terminal.rows, cols:terminal.cols})); } catch (_) {} };
-    const connect = () => {
-      clearTimeout(reconnectTimer);
-      if (socket) { try { socket.close(); } catch (_) {} }
+    const tabBar = $('.terminal-tabs', win);
+    const panes = $('.terminal-panes', win);
+    const fontSize = Number(localStorage.getItem('lumadesk.termFont')) || 12;
+    const sessions = [];
+    let created = 0;
+
+    const active = () => sessions.find(session => session.active) || null;
+
+    const paintTabs = () => {
+      tabBar.innerHTML = sessions.map((session, index) => `<button class="terminal-tab${session.active ? ' active' : ''}" data-index="${index}"><i></i><span>${esc(session.title)}</span><em class="tab-close" data-close="${index}" title="Close tab">×</em></button>`).join('');
+      const current = active();
+      $('.terminal-host', win).textContent = current ? current.status : '';
+    };
+
+    const fitSession = session => {
+      try {
+        session.fit.fit();
+        if (session.socket?.readyState === WebSocket.OPEN) {
+          session.socket.send(JSON.stringify({type: 'resize', rows: session.terminal.rows, cols: session.terminal.cols}));
+        }
+      } catch (_) { /* the pane can detach mid-frame */ }
+    };
+
+    const activate = session => {
+      if (!session) return;
+      sessions.forEach(item => { item.active = item === session; item.pane.classList.toggle('hidden', item !== session); });
+      paintTabs();
+      setTimeout(() => { fitSession(session); session.terminal.focus(); }, 30);
+    };
+
+    const connect = session => {
+      clearTimeout(session.reconnectTimer);
+      if (session.socket) { try { session.socket.close(); } catch (_) {} }
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-      socket = new WebSocket(`${scheme}://${location.host}/ws/terminal`); socket.binaryType = 'arraybuffer';
-      $('.terminal-host', win).textContent = 'connecting…';
-      socket.onopen = () => { $('.terminal-host', win).textContent = `${state.session.user}@${state.session.host}`; resize(); };
+      const socket = new WebSocket(`${scheme}://${location.host}/ws/terminal`);
+      session.socket = socket;
+      socket.binaryType = 'arraybuffer';
+      session.status = 'connecting…';
+      paintTabs();
+      socket.onopen = () => { session.status = `${state.session?.user || 'webos'}@${state.session?.host || location.host}`; paintTabs(); fitSession(session); };
       socket.onmessage = event => {
         if (typeof event.data === 'string') {
-          try { const data = JSON.parse(event.data); if (data.type === 'ready') $('.terminal-host', win).textContent = `${data.user}@${data.host}`; } catch (_) { terminal.write(event.data); }
-        } else terminal.write(new Uint8Array(event.data));
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'ready') { session.status = `${data.user}@${data.host}`; paintTabs(); return; }
+          } catch (_) { session.terminal.write(event.data); }
+        } else session.terminal.write(new Uint8Array(event.data));
       };
-      socket.onclose = () => { $('.terminal-host', win).textContent = 'disconnected'; terminal.write('\r\n\x1b[38;5;245m[session disconnected — press ↻ to reconnect]\x1b[0m\r\n'); };
-      socket.onerror = () => $('.terminal-host', win).textContent = 'connection error';
+      socket.onclose = () => {
+        session.status = 'disconnected';
+        paintTabs();
+        session.terminal.write('\r\n\x1b[38;5;245m[session disconnected — press ↻ to reconnect]\x1b[0m\r\n');
+      };
+      socket.onerror = () => { session.status = 'connection error'; paintTabs(); };
     };
-    terminal.onData(data => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type:'input', data})); });
-    const observer = new ResizeObserver(() => requestAnimationFrame(resize)); observer.observe(container);
-    $('.terminal-clear', win).addEventListener('click', () => { terminal.clear(); terminal.focus(); });
-    $('.terminal-reconnect', win).addEventListener('click', connect);
-    win._onResize = resize; win._onFocus = () => setTimeout(() => terminal.focus(), 20);
-    win._cleanup = () => { clearTimeout(reconnectTimer); observer.disconnect(); socket?.close(); terminal.dispose(); };
-    connect(); setTimeout(() => { resize(); terminal.focus(); }, 100);
+
+    const createSession = () => {
+      created += 1;
+      const pane = document.createElement('div');
+      pane.className = 'terminal-container';
+      panes.append(pane);
+      const terminal = new window.Terminal({
+        cursorBlink: true, cursorStyle: 'bar', fontFamily: 'SFMono-Regular, Cascadia Code, Liberation Mono, monospace',
+        fontSize, lineHeight: 1.25, scrollback: 5000, allowTransparency: true, theme: TERMINAL_THEME
+      });
+      const fit = new window.FitAddon.FitAddon();
+      terminal.loadAddon(fit);
+      terminal.open(pane);
+      const session = {title: `bash ${created}`, pane, terminal, fit, socket: null, reconnectTimer: null, status: 'connecting…', active: false, observer: null};
+      session.observer = new ResizeObserver(() => requestAnimationFrame(() => { if (session.active) fitSession(session); }));
+      session.observer.observe(pane);
+      terminal.onData(data => { if (session.socket?.readyState === WebSocket.OPEN) session.socket.send(JSON.stringify({type: 'input', data})); });
+      sessions.push(session);
+      connect(session);
+      activate(session);
+      return session;
+    };
+
+    const closeSession = session => {
+      const index = sessions.indexOf(session);
+      if (index === -1) return;
+      clearTimeout(session.reconnectTimer);
+      try { session.observer?.disconnect(); } catch (_) {}
+      try { session.socket?.close(); } catch (_) {}
+      try { session.terminal.dispose(); } catch (_) {}
+      session.pane.remove();
+      sessions.splice(index, 1);
+      if (!sessions.length) { createSession(); return; }
+      activate(sessions[Math.min(index, sessions.length - 1)]);
+    };
+
+    tabBar.addEventListener('click', event => {
+      const closer = event.target.closest('[data-close]');
+      if (closer) { closeSession(sessions[Number(closer.dataset.close)]); return; }
+      const tab = event.target.closest('.terminal-tab');
+      if (tab) activate(sessions[Number(tab.dataset.index)]);
+    });
+    $('.terminal-add', win).addEventListener('click', () => createSession());
+    $('.terminal-clear', win).addEventListener('click', () => { const session = active(); if (session) { session.terminal.clear(); session.terminal.focus(); } });
+    $('.terminal-reconnect', win).addEventListener('click', () => { const session = active(); if (session) connect(session); });
+
+    win._onResize = () => fitSession(active());
+    win._onFocus = () => setTimeout(() => active()?.terminal.focus(), 20);
+    win._cleanup = () => {
+      while (sessions.length) {
+        const session = sessions.pop();
+        clearTimeout(session.reconnectTimer);
+        try { session.observer?.disconnect(); } catch (_) {}
+        try { session.socket?.close(); } catch (_) {}
+        try { session.terminal.dispose(); } catch (_) {}
+      }
+    };
+    createSession();
+    setTimeout(() => fitSession(active()), 100);
   }
+
 
   // Service manager
   function servicesMarkup() {

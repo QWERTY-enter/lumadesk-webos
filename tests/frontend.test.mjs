@@ -58,6 +58,16 @@ function stubFetch(url, options = {}) {
     }));
   }
   if (url.startsWith('/api/system')) return Promise.resolve(respond(200, SYSTEM));
+  if (url.startsWith('/api/files/search')) {
+    const query = new URL(url, 'http://localhost').searchParams.get('q') || '';
+    const matches = query.toLowerCase() === 'notes'
+      ? [
+          {name: 'notes.txt', path: '/notes.txt', folder: '/', type: 'file', size: 12, modified: 1_700_000_000, mime: 'text/plain'},
+          {name: 'notes-old.md', path: '/Documents/notes-old.md', folder: '/Documents', type: 'file', size: 40, modified: 1_700_000_000, mime: 'text/markdown'}
+        ]
+      : [];
+    return Promise.resolve(respond(200, {ok: true, query, root: '/', count: matches.length, truncated: false, matches}));
+  }
   if (url.startsWith('/api/files')) {
     const showHidden = url.includes('hidden=1');
     return Promise.resolve(respond(200, {
@@ -84,6 +94,12 @@ const {window} = dom;
 window.fetch = stubFetch;
 window.WebSocket = class {constructor() {this.readyState = 0;} send() {} close() {}};
 window.ResizeObserver = class {observe() {} disconnect() {}};
+window.Terminal = class {
+  constructor(options) {this.options = options; this.rows = 24; this.cols = 80;}
+  loadAddon() {} open() {} write() {} clear() {} focus() {} dispose() {}
+  onData() {return {dispose() {}};}
+};
+window.FitAddon = {FitAddon: class {fit() {}}};
 window.matchMedia = () => ({matches: false, media: '', addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}});
 
 window.eval(readFileSync(path.join(staticDir, 'app.js'), 'utf8'));
@@ -142,6 +158,32 @@ await click(doc.querySelector('.hidden-switch'));
 assert.equal(window.localStorage.getItem('lumadesk.showHidden'), '1', 'the hidden-file default is stored');
 await click(doc.querySelector('.settings-nav button[data-page="about"]'));
 assert.match(doc.querySelector('.settings-page[data-page="about"]').textContent, /LumaDesk OS 1\.1\.0/, 'the about page shows the reported version');
+
+// Workspace search swaps the grid for result rows and clears back to the folder.
+await click(doc.querySelector('.place-button[data-path="/"]'));
+await settle(60);
+assert.equal(doc.querySelectorAll('.file-entry').length, 2, 'the Files window is back in the home folder');
+const searchField = doc.querySelector('.file-search');
+searchField.value = 'notes';
+searchField.dispatchEvent(new window.Event('input', {bubbles: true}));
+await settle(320);
+assert.equal(doc.querySelectorAll('.search-row').length, 2, 'search renders matching rows');
+assert.match(doc.querySelector('.search-row .trash-meta span').textContent, /Workspace root/, 'the result shows its folder');
+assert.ok(calls.some(call => call.includes('/api/files/search?q=notes')), 'the search query reaches the API');
+await click(doc.querySelector('.file-search-clear'));
+await settle(60);
+assert.equal(doc.querySelectorAll('.file-entry').length, 2, 'clearing the search returns to the folder view');
+
+// The terminal opens one tab and supports adding and closing tabs.
+await click(doc.querySelector('.dock-button[data-app="terminal"]'));
+assert.equal(doc.querySelectorAll('.terminal-tab').length, 1, 'the terminal opens with one tab');
+assert.match(doc.querySelector('.terminal-tab span').textContent, /bash 1/);
+await click(doc.querySelector('.terminal-add'));
+assert.equal(doc.querySelectorAll('.terminal-tab').length, 2, 'a second terminal tab opens');
+assert.equal(doc.querySelectorAll('.terminal-tab.active').length, 1, 'only one tab is active');
+await click(doc.querySelector('.tab-close[data-close="0"]'));
+assert.equal(doc.querySelectorAll('.terminal-tab').length, 1, 'closing a tab removes it');
+assert.match(doc.querySelector('.terminal-tab span').textContent, /bash 2/, 'the remaining tab keeps its session');
 
 console.log('frontend smoke test passed');
 dom.window.close();

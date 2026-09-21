@@ -7,7 +7,7 @@ A Docker-hosted Linux workspace with a custom browser desktop, a real PTY shell,
 
 **Debian 13 · systemd · Docker · linux/amd64 · MIT licensed**
 
-Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.1.0`
+Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0`
 
 > LumaDesk is a real Debian userspace, but it is still a container. It shares the Linux host kernel. If you need a separately booted kernel, kernel modules, or stronger tenant isolation, use a VM rather than Docker.
 
@@ -15,8 +15,8 @@ Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.1.0`
 
 - Glass-style responsive web desktop with windows, dock, launcher, lock screen, themes, and keyboard shortcuts
 - Password authentication, signed HTTP-only sessions, CSRF checks, login throttling, and strict browser security headers
-- PTY-backed Bash terminal using xterm.js; the shell runs as the unprivileged `webos` account
-- Persistent file manager with upload, download, drag-and-drop, create, edit, rename, and a restorable Trash
+- PTY-backed Bash terminal using xterm.js with multiple tabs; shells run as the unprivileged `webos` account
+- Persistent file manager with workspace search, upload (including drag-and-drop), download, create, edit, rename, right-click actions, and a restorable Trash
 - systemd service manager with state, start/stop/restart, startup state, and journal viewer
 - Live CPU, RAM, storage, host details, and process manager based on `/proc`/psutil
 - Debian tools including Git, curl, nano, Vim, procps, iproute2, ping, cron, and journal access for the workspace user
@@ -57,7 +57,7 @@ Docker Desktop can run many parts of the project, but systemd/cgroup behavior va
 
 Railway does not expose privileged containers or writable cgroups, so it cannot run the full systemd PID 1 mode. LumaDesk detects Railway automatically and starts a compatibility runtime instead. The browser desktop, PTY terminal, files, editor, uploads, downloads, process list, and live metrics work; the **Services** app and systemd maintenance timer are disabled.
 
-1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.1.0` as a Railway service.
+1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0` as a Railway service.
 2. Add this service variable in the Railway dashboard:
 
 ```dotenv
@@ -90,7 +90,7 @@ docker compose pull webos
 docker compose up -d --no-build
 ```
 
-This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.1.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
+This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.2.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
 
 To build locally from the checked-out source instead:
 
@@ -159,6 +159,7 @@ path and deletion time. The Files sidebar exposes a **Trash** place where you ca
 The same operations are available over the authenticated API:
 
 ```text
+GET  /api/files/search          ?q=term[&path=/folder][&hidden=1] → bounded workspace search
 GET  /api/trash                 list trashed items with their original paths
 POST /api/trash/restore         {"name": "<stored name>"}
 POST /api/trash/purge           {"name": "<stored name>"}
@@ -218,7 +219,7 @@ Restore into a stopped stack after taking a second safety backup.
 | `Ctrl`/`Cmd` + `S` | Save in the text editor |
 | `Esc` | Close launcher, menus, or status panels |
 
-Inside the Files app: right-click an item for Open, Download, Rename, and Move to Trash; `Enter` opens the selection, `F2` renames it, and `Delete` moves it to Trash.
+Inside the Files app: right-click an item for Open, Download, Rename, and Move to Trash; `Enter` opens the selection, `F2` renames it, and `Delete` moves it to Trash. The search field queries the whole folder tree. In the Terminal, `+` opens another shell tab and each tab closes on its own `×`.
 
 ## Security notes
 

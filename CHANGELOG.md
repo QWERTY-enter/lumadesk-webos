@@ -2,6 +2,26 @@
 
 All notable changes to LumaDesk OS are documented here. Versions follow Semantic Versioning.
 
+## [1.2.0] - 2026-09-21
+
+### Added
+
+- Workspace search: `GET /api/files/search?q=…[&path=…][&hidden=1]` walks the workspace
+  case-insensitively, skips the Trash, caps results at 200 (with a `truncated` flag), and
+  bounds the scan so a large home cannot stall the API.
+- Files search field with debounced queries, result rows that show the containing folder,
+  and Open / Download / Show containing folder / Move to Trash actions.
+- Multi-tab Terminal: add, switch, and close independent PTY sessions in one window, each
+  with its own WebSocket, scrollback, resize handling, and reconnect control.
+- Backend tests for search scoping, Trash exclusion, result caps, and auth.
+- Frontend smoke coverage for the search flow and terminal tab lifecycle.
+
+### Changed
+
+- The Terminal keeps its theme in one shared constant and reports per-session status
+  (connecting, `user@host`, disconnected) in the window bar.
+- Image, Compose, and setup references point at `1.2.0`.
+
 ## [1.1.0] - 2026-09-20
 
 ### Added
@@ -53,6 +73,7 @@ All notable changes to LumaDesk OS are documented here. Versions follow Semantic
 - Daily systemd maintenance timer and seeded first-run workspace.
 - GitHub Actions CI, GHCR publishing, SBOM, provenance attestation, checksums, and release archives.
 
+[1.2.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.2.0
 [1.1.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.1.0
 [1.0.1]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.0.1
 [1.0.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.0.0
