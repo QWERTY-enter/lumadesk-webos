@@ -21,6 +21,9 @@ services:
       WEBOS_SECRET: ${WEBOS_SECRET:?Run ./scripts/setup.sh before starting LumaDesk}
       WEBOS_SECURE_COOKIE: ${WEBOS_SECURE_COOKIE:-auto}
       WEBOS_SESSION_SECONDS: ${WEBOS_SESSION_SECONDS:-28800}
+      WEBOS_RATE_LIMIT: ${WEBOS_RATE_LIMIT:-600}
+      WEBOS_MAX_TERMINALS: ${WEBOS_MAX_TERMINALS:-16}
+      WEBOS_METRICS_TOKEN: ${WEBOS_METRICS_TOKEN:-}
     ports:
       - "${WEBOS_BIND:-127.0.0.1}:${WEBOS_PORT:-8080}:8080"
     volumes:
@@ -31,6 +34,14 @@ services:
       - /run
       - /run/lock
       - /tmp:mode=1777
+    # Cap process creation so a fork bomb cannot exhaust the host; a normal
+    # LumaDesk stack runs well under one hundred processes.
+    pids: 1024
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
     stop_grace_period: 30s
     healthcheck:
@@ -58,6 +69,11 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
     networks:
       - lumadesk

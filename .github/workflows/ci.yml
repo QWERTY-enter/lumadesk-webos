@@ -41,9 +41,23 @@ jobs:
 
       - name: Check shell scripts and entrypoint behavior
         run: |
-          bash -n scripts/setup.sh scripts/maintenance.sh tests/test_entrypoint.sh
+          bash -n scripts/setup.sh scripts/maintenance.sh scripts/backup.sh tests/test_entrypoint.sh
           sh -n scripts/entrypoint.sh scripts/healthcheck.sh
           bash tests/test_entrypoint.sh
+
+      - name: Validate Compose configuration
+        run: |
+          WEBOS_PASSWORD='ci-compose-password' \
+          WEBOS_SECRET='ci-compose-secret-0123456789abcdef0123456789abcdef' \
+          WEBOS_DOMAIN=ci.example.com \
+          COMPOSE_PROFILES=public \
+          docker compose config -q
+          # Profiles never change interpolation, so WEBOS_DOMAIN must still exist
+          # when the gateway stays inactive.
+          WEBOS_PASSWORD='ci-compose-password' \
+          WEBOS_SECRET='ci-compose-secret-0123456789abcdef0123456789abcdef' \
+          WEBOS_DOMAIN=ci.example.com \
+          docker compose config -q
 
   image:
     name: Build linux/amd64 image
@@ -93,7 +107,15 @@ jobs:
           health = json.load(open('/tmp/health.json', encoding='utf-8'))
           assert health['ok'] is True
           assert health['runtime'] == 'railway'
+          assert health['checks']['home_writable'] is True
+          assert health['checks']['state_writable'] is True
           PY
+          curl --fail --silent --dump-header /tmp/health-headers.txt \
+            --output /dev/null http://127.0.0.1:18080/healthz
+          grep -qi '^x-request-id:' /tmp/health-headers.txt
+          metrics_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:18080/metrics)
+          test "$metrics_code" = "401"
           test "$(docker exec lumadesk-railway-smoke cat /proc/1/comm)" != systemd
           test "$(docker exec lumadesk-railway-smoke sh -c 'wc -c < /var/lib/lumadesk/session-secret')" -ge 32
           curl --fail --silent \

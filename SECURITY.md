@@ -13,3 +13,5 @@ Please do not open a public issue for an unpatched vulnerability. Use GitHub's *
 ## Deployment boundary
 
 LumaDesk deliberately runs a privileged container to support systemd and cgroups. It is intended for a single trusted administrator on a dedicated Linux host. It is not a hostile multi-tenant sandbox and does not provide a separate kernel. Keep the host and Docker Engine patched, use HTTPS or a private tunnel, and never mount the Docker socket or host root into the container.
+
+Built-in controls that back this policy: signed HTTP-only sessions with CSRF and same-origin checks, login and API rate limits, a cap on concurrent terminal sessions, an allowlisted Store catalog, workspace-confined file APIs, security headers on every response, and an authenticated `/metrics` endpoint. Keep `WEBOS_RATE_LIMIT` and `WEBOS_MAX_TERMINALS` enabled, and treat `WEBOS_METRICS_TOKEN` as a secret when you configure one.

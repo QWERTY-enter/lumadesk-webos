@@ -4,7 +4,7 @@ LABEL org.opencontainers.image.title="LumaDesk OS" \
       org.opencontainers.image.description="Browser-based Debian workspace with systemd and Railway compatibility modes" \
       org.opencontainers.image.source="https://github.com/QWERTY-enter/lumadesk-webos" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.3.0"
+      org.opencontainers.image.version="1.4.0"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV container=docker \

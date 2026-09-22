@@ -7,7 +7,7 @@ A Docker-hosted Linux workspace with a custom browser desktop, a real PTY shell,
 
 **Debian 13 · systemd · Docker · linux/amd64 · MIT licensed**
 
-Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0`
+Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.4.0`
 
 > LumaDesk is a real Debian userspace, but it is still a container. It shares the Linux host kernel. If you need a separately booted kernel, kernel modules, or stronger tenant isolation, use a VM rather than Docker.
 
@@ -24,6 +24,14 @@ Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0`
 - Named volumes for `/home/webos` and application state
 - Optional Caddy gateway with automatic public HTTPS and WebSocket proxying
 - A systemd maintenance timer that cleans 30-day-old Trash entries and their metadata sidecars
+- Production hardening: sliding-window API rate limiting, a concurrent-terminal
+  cap, same-origin checks beside CSRF, request ids on every response, bounded
+  throttle tables, graceful PTY cleanup on shutdown, and rotating container logs
+- `GET /metrics` Prometheus endpoint (session cookie or `WEBOS_METRICS_TOKEN`
+  bearer auth) and a `/healthz` probe that fails when the workspace or state
+  volume is unreadable
+- `scripts/backup.sh` for timestamped volume backups plus CI checks for Compose
+  validity and the Railway compatibility runtime
 
 ## Architecture
 
@@ -58,7 +66,7 @@ Docker Desktop can run many parts of the project, but systemd/cgroup behavior va
 
 Railway does not expose privileged containers or writable cgroups, so it cannot run the full systemd PID 1 mode. LumaDesk detects Railway automatically and starts a compatibility runtime instead. The browser desktop, PTY terminal, files, editor, uploads, downloads, process list, and live metrics work; the **Services** app and systemd maintenance timer are disabled.
 
-1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` as a Railway service.
+1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.4.0` as a Railway service.
 2. Add this service variable in the Railway dashboard:
 
 ```dotenv
@@ -91,7 +99,7 @@ docker compose pull webos
 docker compose up -d --no-build
 ```
 
-This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
+This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.4.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
 
 To build locally from the checked-out source instead:
 
@@ -225,7 +233,15 @@ The image can be rebuilt without replacing user files. Docker volumes are:
 - `lumadesk_lumadesk-state`
 - Caddy data/config volumes in public mode
 
-Example home backup:
+The helper script archives both named volumes and your `.env` file in one step
+(rotating archives live in `backups/`, which Git ignores):
+
+```bash
+./scripts/backup.sh            # writes backups/<volume>-<timestamp>.tgz (mode 600)
+./scripts/backup.sh /mnt/backup
+```
+
+Equivalent manual home backup:
 
 ```bash
 docker run --rm \
@@ -234,7 +250,53 @@ docker run --rm \
   alpine tar czf /backup/lumadesk-home.tgz -C /source .
 ```
 
-Restore into a stopped stack after taking a second safety backup.
+Restore into a stopped stack after taking a second safety backup:
+
+```bash
+docker compose down
+docker run --rm -v lumadesk_lumadesk-home:/target -v "$PWD":/backup \
+  alpine tar xzf /backup/backups/lumadesk_lumadesk-home-<stamp>.tgz -C /target .
+docker compose up -d
+```
+
+## Operations and observability
+
+Health probe (used by Compose and Railway):
+
+```bash
+curl -s http://127.0.0.1:8080/healthz
+# {"ok":true,...,"checks":{"home_writable":true,"state_writable":true},...}
+# Returns 503 when the workspace or state directory cannot be written.
+```
+
+Prometheus metrics (every response carries an `X-Request-ID` for log correlation):
+
+```bash
+# With a browser session cookie, or with a scrape token set in .env:
+curl -s -H "Authorization: Bearer $WEBOS_METRICS_TOKEN" \
+  http://127.0.0.1:8080/metrics
+```
+
+Exposed series include `lumadesk_http_requests_total`, `lumadesk_terminal_sessions`
+(with `_max`), `lumadesk_uptime_seconds`, `lumadesk_store_jobs`, and
+`lumadesk_process_resident_memory_bytes`. Without `WEBOS_METRICS_TOKEN` the
+endpoint only answers to an authenticated session (401 otherwise). The token is
+moved into the root-only bootstrap file at startup, so unprivileged workspace
+shells cannot read it.
+
+Tuning knobs (defaults suit a single-admin host):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEBOS_RATE_LIMIT` | `600` | `/api` + `/ws` requests per client per minute (`0` disables) |
+| `WEBOS_MAX_TERMINALS` | `16` | Concurrent PTY sessions before the handshake returns 429 |
+| `WEBOS_METRICS_TOKEN` | unset | Bearer token (16+ chars) for unattended `/metrics` scrapes |
+| `WEBOS_SESSION_SECONDS` | `28800` | Session lifetime in seconds |
+
+Rate limiting keys on the first `X-Forwarded-For` address when present — keep
+the direct port bound to `127.0.0.1` or behind Caddy so the header stays
+trustworthy. Container logs rotate at 10 MB × 5 files per service, and Compose
+caps the stack at 1024 processes to contain fork bombs.
 
 ## Keyboard shortcuts
 
@@ -262,6 +324,9 @@ This stack deliberately uses a privileged container so systemd can manage cgroup
 - The Store runs `apt-get` as root inside the container. It only accepts ids from the
   built-in catalog, and every package name is validated against a strict pattern, but
   installing software still changes the runtime — review catalog entries before adding them.
+- API traffic is rate limited per client address, mutating requests must carry both the
+  CSRF token and a matching `Origin`, terminals are capped, and `/metrics` is
+  authenticated — treat `WEBOS_METRICS_TOKEN` like a password if you set one.
 
 ## Troubleshooting
 
@@ -310,7 +375,8 @@ python3 server.py
 
 Open <http://127.0.0.1:8080> and use `preview-access-2026`. Never use demo mode on a public machine.
 
-Run the backend tests (auth, workspace paths, Trash lifecycle, PTY terminal) with:
+Run the backend tests (auth, workspace paths, Trash lifecycle, PTY terminal,
+rate limits, origin checks, metrics, health) with:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -334,6 +400,7 @@ systemd/                   Main service and maintenance timer units
 seed/                      First-run files copied into the home volume
 scripts/setup.sh           Credential/environment generator
 scripts/maintenance.sh     Trash cleanup task
+scripts/backup.sh          Volume + .env backup archives
 Dockerfile                 Debian + systemd image
 Caddyfile                  Optional automatic HTTPS gateway
 docker-compose.yml         Runtime, cgroup, persistence, and public profile
