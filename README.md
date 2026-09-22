@@ -7,7 +7,7 @@ A Docker-hosted Linux workspace with a custom browser desktop, a real PTY shell,
 
 **Debian 13 · systemd · Docker · linux/amd64 · MIT licensed**
 
-Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1`
+Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0`
 
 > LumaDesk is a real Debian userspace, but it is still a container. It shares the Linux host kernel. If you need a separately booted kernel, kernel modules, or stronger tenant isolation, use a VM rather than Docker.
 
@@ -15,14 +15,15 @@ Published image: `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1`
 
 - Glass-style responsive web desktop with windows, dock, launcher, lock screen, themes, and keyboard shortcuts
 - Password authentication, signed HTTP-only sessions, CSRF checks, login throttling, and strict browser security headers
-- PTY-backed Bash terminal using xterm.js; the shell runs as the unprivileged `webos` account
-- Persistent file manager with upload, download, create, edit, rename, and soft-delete to Trash
+- PTY-backed Bash terminal using xterm.js with multiple tabs; shells run as the unprivileged `webos` account
+- Persistent file manager with workspace search, upload (including drag-and-drop), download, create, edit, rename, right-click actions, and a restorable Trash
+- CasaOS-style Store that installs curated Debian packages, adds launcher shortcuts, and tracks installed state
 - systemd service manager with state, start/stop/restart, startup state, and journal viewer
 - Live CPU, RAM, storage, host details, and process manager based on `/proc`/psutil
 - Debian tools including Git, curl, nano, Vim, procps, iproute2, ping, cron, and journal access for the workspace user
 - Named volumes for `/home/webos` and application state
 - Optional Caddy gateway with automatic public HTTPS and WebSocket proxying
-- A systemd maintenance timer that cleans 30-day-old Trash entries
+- A systemd maintenance timer that cleans 30-day-old Trash entries and their metadata sidecars
 
 ## Architecture
 
@@ -57,7 +58,7 @@ Docker Desktop can run many parts of the project, but systemd/cgroup behavior va
 
 Railway does not expose privileged containers or writable cgroups, so it cannot run the full systemd PID 1 mode. LumaDesk detects Railway automatically and starts a compatibility runtime instead. The browser desktop, PTY terminal, files, editor, uploads, downloads, process list, and live metrics work; the **Services** app and systemd maintenance timer are disabled.
 
-1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1` as a Railway service.
+1. Deploy this GitHub repository or `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` as a Railway service.
 2. Add this service variable in the Railway dashboard:
 
 ```dotenv
@@ -90,7 +91,7 @@ docker compose pull webos
 docker compose up -d --no-build
 ```
 
-This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.0.1` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
+This pulls `ghcr.io/qwerty-enter/lumadesk-webos:1.3.0` for `linux/amd64`. Open <http://127.0.0.1:8080> through an SSH tunnel or from the host itself.
 
 To build locally from the checked-out source instead:
 
@@ -146,6 +147,55 @@ WEBOS_PASSWORD='a-long-unique-password' ./scripts/setup.sh --force
 
 Passwords must contain at least 8 characters; 12 or more is strongly recommended. `WEBOS_SECRET` is optional and is generated automatically when omitted or too short. Do not commit `.env`; it is ignored by Git and excluded from Docker builds.
 
+## App Store
+
+The Store is a curated catalog, not a free-form package installer: the browser sends a
+catalog id and the backend maps it to a fixed payload. Three entry types are supported:
+
+| Type | Install action | Where it appears |
+|---|---|---|
+| `package` | `apt-get install -y --no-install-recommends <allowlisted packages>` | Launcher tile when the entry declares a command |
+| `shortcut` | Records a launcher that opens a Terminal running a preset command | Launcher and desktop |
+| `link` | Records an external HTTPS resource | Launcher and desktop |
+
+```text
+GET  /api/store                 catalog merged with installed state (from dpkg-query)
+POST /api/store/{id}/install    starts a background job, returns {"job": "<id>"}
+POST /api/store/{id}/uninstall  same, for removal
+GET  /api/store/jobs/{job}      job state and command log
+```
+
+Installs are serialized behind a global lock and their output is kept in a job log you can
+open from the app card. Installed entries persist in `$WEBOS_STATE/installed-apps.json`.
+
+Package installation needs the privileged systemd runtime, because the backend must be root
+to run `apt-get`. On Railway or `WEBOS_RUNTIME=standalone` the Store still works for
+shortcuts and links, and package cards explain that installs are unavailable instead of
+failing halfway.
+
+## Files, Trash, and recovery
+
+Deleting an item in the Files app moves it to `~/.local/share/Trash/files` and writes a
+FreeDesktop `~/.local/share/Trash/info/<name>.trashinfo` sidecar that records the original
+path and deletion time. The Files sidebar exposes a **Trash** place where you can:
+
+- restore an item to its original folder (a ` (2)` suffix is added when the name is taken);
+- permanently delete a single item;
+- empty the whole Trash.
+
+The same operations are available over the authenticated API:
+
+```text
+GET  /api/files/search          ?q=term[&path=/folder][&hidden=1] → bounded workspace search
+GET  /api/trash                 list trashed items with their original paths
+POST /api/trash/restore         {"name": "<stored name>"}
+POST /api/trash/purge           {"name": "<stored name>"}
+POST /api/trash/empty           remove everything in the Trash
+```
+
+Items older than 30 days are purged by the maintenance timer, and orphaned sidecars are
+removed with them.
+
 ## Managing the real init system
 
 ```bash
@@ -194,7 +244,9 @@ Restore into a stopped stack after taking a second safety backup.
 | `Ctrl` + `Space` | Open application launcher |
 | `Alt` + `F4` | Close active window |
 | `Ctrl`/`Cmd` + `S` | Save in the text editor |
-| `Esc` | Close launcher or status panels |
+| `Esc` | Close launcher, menus, or status panels |
+
+Inside the Files app: right-click an item for Open, Download, Rename, and Move to Trash; `Enter` opens the selection, `F2` renames it, and `Delete` moves it to Trash. The search field queries the whole folder tree. In the Terminal, `+` opens another shell tab and each tab closes on its own `×`.
 
 ## Security notes
 
@@ -207,6 +259,9 @@ This stack deliberately uses a privileged container so systemd can manage cgroup
 - Use a unique password and put the public endpoint behind an identity-aware proxy or VPN if possible.
 - The browser shell is non-root and has no sudo grant. It belongs to `systemd-journal` for log inspection; the authenticated web backend remains privileged to operate service units.
 - LumaDesk is intended for one trusted administrator, not hostile multi-tenant hosting.
+- The Store runs `apt-get` as root inside the container. It only accepts ids from the
+  built-in catalog, and every package name is validated against a strict pattern, but
+  installing software still changes the runtime — review catalog entries before adding them.
 
 ## Troubleshooting
 
@@ -255,17 +310,25 @@ python3 server.py
 
 Open <http://127.0.0.1:8080> and use `preview-access-2026`. Never use demo mode on a public machine.
 
-Run the backend security unit tests with:
+Run the backend tests (auth, workspace paths, Trash lifecycle, PTY terminal) with:
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+The desktop interface has its own DOM smoke test, which loads the real `index.html` and
+`app.js` in jsdom and drives the Files, Trash, and Settings flows:
+
+```bash
+npm ci
+npm run test:frontend
 ```
 
 ## Project layout
 
 ```text
 .github/workflows/         CI, GHCR image publishing, and GitHub Releases
-app/server.py              Auth, REST APIs, service manager, PTY WebSocket
+app/server.py              Auth, REST APIs, Trash, service manager, PTY WebSocket
 app/static/                Desktop interface and vendored xterm assets
 systemd/                   Main service and maintenance timer units
 seed/                      First-run files copied into the home volume

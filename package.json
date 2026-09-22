@@ -1,0 +1,11 @@
+{
+  "name": "lumadesk-webos",
+  "private": true,
+  "description": "Development tooling for the LumaDesk OS browser desktop",
+  "scripts": {
+    "test:frontend": "node tests/frontend.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.0"
+  }
+}

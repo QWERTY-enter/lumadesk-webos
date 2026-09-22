@@ -8,3 +8,4 @@ app/node_modules/
 .demo-state/
 .railway-test/
 *-preview.png
+node_modules/

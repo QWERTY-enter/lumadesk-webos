@@ -4,7 +4,7 @@ LABEL org.opencontainers.image.title="LumaDesk OS" \
       org.opencontainers.image.description="Browser-based Debian workspace with systemd and Railway compatibility modes" \
       org.opencontainers.image.source="https://github.com/QWERTY-enter/lumadesk-webos" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.0.1"
+      org.opencontainers.image.version="1.3.0"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV container=docker \
@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R webos:webos /home/webos /var/lib/lumadesk
 
 COPY --chown=root:root app/ /opt/lumadesk/
+COPY --chown=root:root VERSION /opt/lumadesk/VERSION
 COPY --chown=root:root systemd/lumadesk.service /etc/systemd/system/lumadesk.service
 COPY --chown=root:root systemd/lumadesk-maintenance.service /etc/systemd/system/lumadesk-maintenance.service
 COPY --chown=root:root systemd/lumadesk-maintenance.timer /etc/systemd/system/lumadesk-maintenance.timer
