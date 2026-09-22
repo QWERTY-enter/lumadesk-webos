@@ -53,8 +53,15 @@ SECRET_TEXT = os.environ.get("WEBOS_SECRET", BOOT_CONFIG.get("secret", ""))
 COOKIE_NAME = "lumadesk_session"
 SESSION_SECONDS = int(os.environ.get("WEBOS_SESSION_SECONDS", "28800"))
 DEMO_MODE = os.environ.get("WEBOS_DEMO", "false").lower() in {"1", "true", "yes"}
+# Optional bearer token for unattended /metrics scrapes. Falls back to the
+# bootstrap file so the token never sits in systemd's manager environment.
+METRICS_TOKEN = (
+    os.environ.get("WEBOS_METRICS_TOKEN") or BOOT_CONFIG.get("metrics_token") or ""
+).strip()
 MIN_PASSWORD_LENGTH = 8
+MIN_METRICS_TOKEN_LENGTH = 16
 TRASH_STAMP_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?-")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 
 
 def _read_version() -> str:
@@ -107,7 +114,39 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 LOG = logging.getLogger("lumadesk")
+
+
+def _int_env(name: str, default: int, low: int, high: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOG.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+    if not low <= value <= high:
+        LOG.warning("Clamping %s=%r into [%s, %s]", name, value, low, high)
+    return max(low, min(value, high))
+
+
+# Sliding-window cap for authenticated API abuse; 0 disables it. The frontend
+# peaks well under 10 requests/second, so the default leaves generous headroom.
+RATE_LIMIT_PER_MINUTE = _int_env("WEBOS_RATE_LIMIT", 600, 0, 100_000)
+# Concurrent PTY sessions (active plus reserved) to keep a runaway client from
+# forking the container into oblivion.
+MAX_TERMINALS = _int_env("WEBOS_MAX_TERMINALS", 16, 1, 1024)
+RATE_WINDOW_SECONDS = 60.0
+RATE_BUCKET_KEYS_LIMIT = 8192
+LOGIN_ATTEMPTS_KEYS_LIMIT = 2048
+STARTED_AT = time.time()
+
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
+RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+HTTP_REQUESTS: dict[str, int] = defaultdict(int)
+# PTY sessions that are reserved or running, used for the cap and shutdown.
+PTY_SLOTS = 0
+ACTIVE_PTYS: set[int] = set()
 
 
 def _runtime_mode() -> str:
@@ -143,12 +182,18 @@ def _persistent_session_secret() -> str:
 
 
 def _validate_config() -> bytes:
-    global SECRET_TEXT
+    global SECRET_TEXT, METRICS_TOKEN
     if DEMO_MODE and not PASSWORD:
         # Demo mode is only intended for a private development preview.
         globals()["PASSWORD"] = "preview-access-2026"
     if len(PASSWORD) < MIN_PASSWORD_LENGTH:
         raise SystemExit(f"WEBOS_PASSWORD must contain at least {MIN_PASSWORD_LENGTH} characters")
+    if METRICS_TOKEN and len(METRICS_TOKEN) < MIN_METRICS_TOKEN_LENGTH:
+        LOG.warning(
+            "WEBOS_METRICS_TOKEN must be at least %s characters; token access to /metrics is disabled",
+            MIN_METRICS_TOKEN_LENGTH,
+        )
+        METRICS_TOKEN = ""
     if len(SECRET_TEXT) < 32:
         if DEMO_MODE:
             SECRET_TEXT = secrets.token_hex(32)
@@ -240,13 +285,90 @@ async def error_middleware(request: web.Request, handler):
         return await handler(request)
     except web.HTTPException as exc:
         if request.path.startswith("/api/"):
-            return json_response({"ok": False, "error": exc.reason}, exc.status)
+            response = json_response({"ok": False, "error": exc.reason}, exc.status)
+            # Preserve retry hints (429) and auth challenges on JSON errors.
+            for header in ("Retry-After", "WWW-Authenticate"):
+                value = (exc.headers or {}).get(header)
+                if value:
+                    response.headers[header] = value
+            return response
         raise
     except asyncio.TimeoutError:
         return json_response({"ok": False, "error": "The operation timed out"}, 504)
-    except Exception as exc:  # keep internals out of HTTP responses
-        LOG.exception("Unhandled error on %s %s", request.method, request.path)
+    except Exception:  # keep internals out of HTTP responses
+        LOG.exception(
+            "Unhandled error on %s %s (request_id=%s)",
+            request.method,
+            request.path,
+            request.get("request_id", "-"),
+        )
         return json_response({"ok": False, "error": "Internal server error"}, 500)
+
+
+@web.middleware
+async def request_id_middleware(request: web.Request, handler):
+    candidate = request.headers.get("X-Request-ID", "")
+    request_id = candidate if REQUEST_ID_RE.fullmatch(candidate) else secrets.token_hex(8)
+    request["request_id"] = request_id
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        headers = getattr(exc, "headers", None)
+        if headers is not None:
+            headers["X-Request-ID"] = request_id
+        raise
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@web.middleware
+async def metrics_middleware(request: web.Request, handler):
+    status: int | None = None
+    try:
+        response = await handler(request)
+        status = response.status
+        return response
+    except web.HTTPException as exc:
+        status = exc.status
+        raise
+    except Exception:
+        status = 500
+        raise
+    finally:
+        if status is not None:
+            HTTP_REQUESTS[f"{request.method}:{status}"] += 1
+
+
+@web.middleware
+async def rate_limit_middleware(request: web.Request, handler):
+    if RATE_LIMIT_PER_MINUTE > 0 and (
+        request.path.startswith("/api/") or request.path.startswith("/ws/")
+    ):
+        now = time.monotonic()
+        bucket = RATE_BUCKETS[_client_key(request)]
+        cutoff = now - RATE_WINDOW_SECONDS
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(RATE_BUCKETS) > RATE_BUCKET_KEYS_LIMIT:
+            _prune_rate_buckets(cutoff)
+        if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+            oldest = bucket[0] if bucket else now
+            retry_after = max(1, int(RATE_WINDOW_SECONDS - (now - oldest)) + 1)
+            raise web.HTTPTooManyRequests(
+                reason="Too many requests; slow down and retry shortly",
+                headers={"Retry-After": str(retry_after)},
+            )
+        bucket.append(now)
+    return await handler(request)
+
+
+def _metrics_token_matches(request: web.Request) -> bool:
+    if not METRICS_TOKEN:
+        return False
+    supplied = request.headers.get("Authorization", "")
+    if not supplied.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(supplied[7:].strip(), METRICS_TOKEN)
 
 
 @web.middleware
@@ -257,13 +379,43 @@ async def auth_middleware(request: web.Request, handler):
     )
     session = parse_session(request.cookies.get(COOKIE_NAME))
     request["session"] = session
+    if request.path == "/metrics":
+        if not (session or _metrics_token_matches(request)):
+            headers = {"WWW-Authenticate": 'Bearer realm="lumadesk-metrics"'} if METRICS_TOKEN else None
+            raise web.HTTPUnauthorized(reason="Authentication required", headers=headers)
+        return await handler(request)
     if not public and not session:
         raise web.HTTPUnauthorized(reason="Authentication required")
     if session and request.method not in {"GET", "HEAD", "OPTIONS"} and request.path != "/api/login":
         supplied = request.headers.get("X-LumaDesk-CSRF", "")
         if not hmac.compare_digest(supplied, str(session.get("csrf", ""))):
             raise web.HTTPForbidden(reason="Invalid request token")
+        # Defense in depth beside the CSRF token: browsers always attach
+        # Origin to cross-site-capable requests, so reject mismatches outright.
+        origin = request.headers.get("Origin")
+        if origin is not None:
+            expected = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip().lower()
+            if urlsplit(origin).netloc.lower() != expected:
+                raise web.HTTPForbidden(reason="Origin does not match this workspace")
     return await handler(request)
+
+
+def _client_key(request: web.Request) -> str:
+    """Stable client identity for throttles; first X-Forwarded-For hop when proxied."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    candidate = forwarded.split(",")[0].strip() if forwarded else (request.remote or "")
+    if not candidate or len(candidate) > 64 or any(ch in candidate for ch in "\r\n\t"):
+        return "unknown"
+    return candidate
+
+
+def _prune_rate_buckets(cutoff: float) -> None:
+    for key in list(RATE_BUCKETS):
+        bucket = RATE_BUCKETS[key]
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if not bucket:
+            RATE_BUCKETS.pop(key, None)
 
 
 @web.middleware
@@ -295,15 +447,27 @@ async def manifest(_: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "manifest.webmanifest")
 
 
+def _dir_writable(path: Path) -> bool:
+    try:
+        return path.is_dir() and os.access(path, os.W_OK)
+    except OSError:
+        return False
+
+
 async def health(_: web.Request) -> web.Response:
+    checks = {"home_writable": _dir_writable(HOME_ROOT), "state_writable": _dir_writable(STATE_DIR)}
+    healthy = all(checks.values())
     return json_response(
         {
-            "ok": True,
+            "ok": healthy,
             "service": "lumadesk",
             "version": APP_VERSION,
             "runtime": RUNTIME_MODE,
+            "uptime": int(time.time() - STARTED_AT),
+            "checks": checks,
             "time": datetime.now(timezone.utc).isoformat(),
-        }
+        },
+        200 if healthy else 503,
     )
 
 
@@ -313,6 +477,12 @@ async def login(request: web.Request) -> web.Response:
     attempts = LOGIN_ATTEMPTS[remote]
     while attempts and attempts[0] < now - 300:
         attempts.popleft()
+    if len(LOGIN_ATTEMPTS) > LOGIN_ATTEMPTS_KEYS_LIMIT:
+        # Bound the throttle table so spoofed source addresses cannot grow it forever.
+        for key in list(LOGIN_ATTEMPTS):
+            queue = LOGIN_ATTEMPTS[key]
+            if not queue or queue[-1] < now - 300:
+                LOGIN_ATTEMPTS.pop(key, None)
     if len(attempts) >= 8:
         return json_response({"ok": False, "error": "Too many attempts; wait five minutes"}, 429)
     try:
@@ -997,19 +1167,36 @@ async def process_signal(request: web.Request) -> web.Response:
     return json_response({"ok": True, "pid": pid, "signal": requested})
 
 
+def _reserve_terminal_slot() -> None:
+    """Atomically claim one PTY slot; raises 429 when the cap is reached."""
+    global PTY_SLOTS
+    if PTY_SLOTS >= MAX_TERMINALS:
+        raise web.HTTPTooManyRequests(
+            reason="Too many terminal sessions are already open",
+            headers={"Retry-After": "10"},
+        )
+    PTY_SLOTS += 1
+
+
+def _release_terminal_slot() -> None:
+    global PTY_SLOTS
+    PTY_SLOTS = max(0, PTY_SLOTS - 1)
+
+
 async def terminal_socket(request: web.Request) -> web.WebSocketResponse:
     origin = request.headers.get("Origin")
     expected_host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip().lower()
     if origin and urlsplit(origin).netloc.lower() != expected_host:
         raise web.HTTPForbidden(reason="WebSocket origin does not match this workspace")
+    _reserve_terminal_slot()
     ws = web.WebSocketResponse(heartbeat=25, max_msg_size=128 * 1024)
-    await ws.prepare(request)
     pid = -1
     master = -1
     loop = asyncio.get_running_loop()
     outgoing: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
 
     try:
+        await ws.prepare(request)
         pid, master = pty.fork()
         if pid == 0:  # child
             try:
@@ -1030,6 +1217,7 @@ async def terminal_socket(request: web.Request) -> web.WebSocketResponse:
                 os.execvpe(WEBOS_SHELL, [WEBOS_SHELL, "-l"], env)
             except Exception:
                 os._exit(127)
+        ACTIVE_PTYS.add(pid)
         os.set_blocking(master, False)
 
         def on_pty_output() -> None:
@@ -1073,15 +1261,28 @@ async def terminal_socket(request: web.Request) -> web.WebSocketResponse:
                 except json.JSONDecodeError:
                     continue
                 if payload.get("type") == "input":
-                    os.write(master, str(payload.get("data", "")).encode())
+                    data = str(payload.get("data", ""))
+                    if len(data) > 65_536:
+                        data = data[:65_536]
+                    try:
+                        os.write(master, data.encode())
+                    except (BlockingIOError, InterruptedError):
+                        pass  # PTY buffer is full; dropping input beats killing the session
+                    except OSError:
+                        break
                 elif payload.get("type") == "resize":
                     rows = max(2, min(int(payload.get("rows", 24)), 200))
                     cols = max(10, min(int(payload.get("cols", 80)), 500))
-                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                    try:
+                        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                    except OSError:
+                        break
             elif message.type in {WSMsgType.ERROR, WSMsgType.CLOSE, WSMsgType.CLOSED}:
                 break
         sender_task.cancel()
     finally:
+        ACTIVE_PTYS.discard(pid)
+        _release_terminal_slot()
         if master >= 0:
             try:
                 loop.remove_reader(master)
@@ -1116,6 +1317,31 @@ async def terminal_socket(request: web.Request) -> web.WebSocketResponse:
                 except ChildProcessError:
                     pass
     return ws
+
+
+async def shutdown_active_ptys(_: web.Application) -> None:
+    """Best-effort cleanup of live shells when the service stops."""
+    pids = [pid for pid in ACTIVE_PTYS if pid > 0]
+    if not pids:
+        return
+    LOG.info("Closing %d active terminal session(s)", len(pids))
+    for pid in pids:
+        try:
+            os.killpg(pid, signal.SIGHUP)
+        except (ProcessLookupError, PermissionError):
+            ACTIVE_PTYS.discard(pid)
+    for _ in range(20):
+        if not any(pid > 0 for pid in ACTIVE_PTYS):
+            return
+        await asyncio.sleep(0.05)
+    for pid in list(ACTIVE_PTYS):
+        if pid <= 0:
+            continue
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        ACTIVE_PTYS.discard(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -1419,6 +1645,64 @@ async def store_job_status(request: web.Request) -> web.Response:
     return json_response({"ok": True, "job": job})
 
 
+# ---------------------------------------------------------------------------
+# /metrics: Prometheus text exposition without extra dependencies. Auth is a
+# signed session cookie or, for unattended scrapers, WEBOS_METRICS_TOKEN.
+# ---------------------------------------------------------------------------
+def _prom_label(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _metrics_text() -> str:
+    lines = [
+        "# HELP lumadesk_info LumaDesk build and runtime information.",
+        "# TYPE lumadesk_info gauge",
+        f'lumadesk_info{{version="{_prom_label(APP_VERSION)}",'
+        f'runtime="{_prom_label(RUNTIME_MODE)}",'
+        f'host="{_prom_label(socket.gethostname())}"}} 1',
+        "# HELP lumadesk_uptime_seconds Seconds since the HTTP service started.",
+        "# TYPE lumadesk_uptime_seconds gauge",
+        f"lumadesk_uptime_seconds {max(0, int(time.time() - STARTED_AT))}",
+        "# HELP lumadesk_http_requests_total HTTP requests handled, by method and status code.",
+        "# TYPE lumadesk_http_requests_total counter",
+    ]
+    for key, count in sorted(HTTP_REQUESTS.items()):
+        method, _, status = key.partition(":")
+        lines.append(f'lumadesk_http_requests_total{{method="{_prom_label(method)}",status="{_prom_label(status)}"}} {count}')
+    lines += [
+        "# HELP lumadesk_terminal_sessions Active or reserved PTY sessions.",
+        "# TYPE lumadesk_terminal_sessions gauge",
+        f"lumadesk_terminal_sessions {PTY_SLOTS}",
+        "# HELP lumadesk_terminal_sessions_max Configured PTY session cap.",
+        "# TYPE lumadesk_terminal_sessions_max gauge",
+        f"lumadesk_terminal_sessions_max {MAX_TERMINALS}",
+        "# HELP lumadesk_login_throttle_entries Clients tracked by the login throttle.",
+        "# TYPE lumadesk_login_throttle_entries gauge",
+        f"lumadesk_login_throttle_entries {len(LOGIN_ATTEMPTS)}",
+        "# HELP lumadesk_store_jobs Store jobs currently tracked, by state.",
+        "# TYPE lumadesk_store_jobs gauge",
+    ]
+    job_states: dict[str, int] = defaultdict(int)
+    for job in STORE_JOBS.values():
+        job_states[str(job.get("state", "unknown"))] += 1
+    if not job_states:
+        lines.append('lumadesk_store_jobs{state="none"} 0')
+    for state, count in sorted(job_states.items()):
+        lines.append(f'lumadesk_store_jobs{{state="{_prom_label(state)}"}} {count}')
+    lines += [
+        "# HELP lumadesk_process_resident_memory_bytes Resident memory of the service process.",
+        "# TYPE lumadesk_process_resident_memory_bytes gauge",
+    ]
+    try:
+        rss = psutil.Process().memory_info().rss
+    except (psutil.Error, OSError):
+        rss = 0
+    lines.append(f"lumadesk_process_resident_memory_bytes {rss}")
+    return "\n".join(lines) + "\n"
+
+
+async def metrics_endpoint(_: web.Request) -> web.Response:
+    return web.Response(text=_metrics_text(), content_type="text/plain", charset="utf-8")
 
 
 _validate_catalog()
@@ -1428,12 +1712,21 @@ def create_app() -> web.Application:
     HOME_ROOT.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     app = web.Application(
-        middlewares=[error_middleware, security_headers, auth_middleware],
+        middlewares=[
+            security_headers,      # headers on every response, including errors
+            request_id_middleware, # correlation id for logs and clients
+            metrics_middleware,    # count final outcomes, including 5xx
+            error_middleware,      # JSON-ify API errors, keep internals hidden
+            rate_limit_middleware, # throttle /api and /ws before auth work
+            auth_middleware,       # session, CSRF, origin, metrics token
+        ],
         client_max_size=32 * 1024 * 1024,
     )
+    app.on_shutdown.append(shutdown_active_ptys)
     app.router.add_get("/", index)
     app.router.add_get("/manifest.webmanifest", manifest)
     app.router.add_get("/healthz", health)
+    app.router.add_get("/metrics", metrics_endpoint)
     app.router.add_post("/api/login", login)
     app.router.add_get("/api/session", session_info)
     app.router.add_post("/api/logout", logout)

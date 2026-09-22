@@ -2,6 +2,50 @@
 
 All notable changes to LumaDesk OS are documented here. Versions follow Semantic Versioning.
 
+## [1.4.0] - 2026-09-22
+
+### Added
+
+- **Production hardening pass** across security, reliability, and observability
+  (both the full systemd runtime and Railway/standalone compatibility mode).
+- Sliding-window API rate limiting for `/api` and `/ws` traffic
+  (`WEBOS_RATE_LIMIT`, default 600 requests/minute/client, `0` disables) with
+  `429` responses that carry `Retry-After`.
+- Concurrent terminal session cap (`WEBOS_MAX_TERMINALS`, default 16) so a
+  runaway client cannot fork-bomb the container; the handshake returns `429`
+  when the cap is reached.
+- `GET /metrics` with Prometheus text exposition (request counters, terminal
+  sessions, uptime, build info, store jobs, resident memory). Access requires
+  a signed session or, for unattended scrapers, `WEBOS_METRICS_TOKEN`
+  (16+ characters, passed through the root-only bootstrap file like the
+  password).
+- `X-Request-ID` on every response (client-supplied ids are echoed when
+  well-formed); unhandled-error logs now include the correlation id.
+- Same-origin `Origin` verification on authenticated mutating requests as
+  defense in depth beside the CSRF token.
+- `/healthz` now reports `checks` (`home_writable`, `state_writable`) and
+  `uptime`, returning `503` when the workspace or state directory is broken.
+- `scripts/backup.sh` for timestamped home/state volume archives plus the
+  `.env` credentials file, with restore guidance in the README.
+- Compose `pids: 1024` limit and JSON-file log rotation (10 MB × 5) for both
+  services.
+- CI: shell-syntax check for `backup.sh`, `docker compose config` validation
+  for both profiles, and smoke assertions for health checks, request ids, and
+  `/metrics` authentication. Dependabot now watches GitHub Actions and the
+  Docker base image weekly.
+
+### Changed
+
+- Middleware order guarantees security headers and request ids on error
+  responses; `429` JSON errors preserve `Retry-After`.
+- Terminal input is bounded (64 KB per message) and PTY buffer backpressure
+  drops input instead of tearing down the session.
+- The login throttle table and rate-limit buckets prune idle clients so
+  spoofed source addresses cannot grow them without bound.
+- Active PTY sessions are closed gracefully (SIGHUP, then SIGKILL) during
+  service shutdown.
+- Image, Compose, and setup references point at `1.4.0`.
+
 ## [1.3.0] - 2026-09-21
 
 ### Added
@@ -100,6 +144,7 @@ All notable changes to LumaDesk OS are documented here. Versions follow Semantic
 - Daily systemd maintenance timer and seeded first-run workspace.
 - GitHub Actions CI, GHCR publishing, SBOM, provenance attestation, checksums, and release archives.
 
+[1.4.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.4.0
 [1.3.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.3.0
 [1.2.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.2.0
 [1.1.0]: https://github.com/QWERTY-enter/lumadesk-webos/releases/tag/v1.1.0

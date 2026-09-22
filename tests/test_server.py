@@ -439,5 +439,159 @@ class TerminalSocketTests(ApiTestCase):
             self.assertIn(b"lumadesk-pty-check", bytes(collected))
 
 
+class RequestIdTests(ApiTestCase):
+    async def test_request_id_is_issued_and_echoed(self):
+        response = await self.client.get("/healthz")
+        issued = response.headers.get("X-Request-ID")
+        self.assertTrue(issued)
+        self.assertRegex(issued, r"^[A-Za-z0-9._-]{8,64}$")
+        response = await self.client.get("/healthz", headers={"X-Request-ID": "client-supplied-id"})
+        self.assertEqual(response.headers.get("X-Request-ID"), "client-supplied-id")
+
+    async def test_malformed_request_id_is_replaced(self):
+        response = await self.client.get("/healthz", headers={"X-Request-ID": "tiny"})
+        replaced = response.headers.get("X-Request-ID")
+        self.assertNotEqual(replaced, "tiny")
+        self.assertRegex(replaced, r"^[0-9a-f]{16}$")
+
+    async def test_api_errors_carry_the_request_id(self):
+        response = await self.client.get("/api/files", params={"path": "/../etc/passwd"})
+        self.assertEqual(response.status, 403)
+        self.assertTrue(response.headers.get("X-Request-ID"))
+
+
+class OriginCheckTests(ApiTestCase):
+    async def test_mismatched_origin_is_rejected_even_with_csrf(self):
+        response = await self.client.post(
+            "/api/logout", json={}, headers={**self.headers, "Origin": "http://evil.example"}
+        )
+        self.assertEqual(response.status, 403)
+        payload = await response.json()
+        self.assertIn("Origin", payload["error"])
+
+    async def test_matching_origin_is_accepted(self):
+        origin = f"http://{self.client.server.host}:{self.client.server.port}"
+        response = await self.client.post(
+            "/api/logout", json={}, headers={**self.headers, "Origin": origin}
+        )
+        self.assertEqual(response.status, 200, await response.text())
+
+
+class RateLimitTests(ApiTestCase):
+    async def test_api_rate_limit_returns_429_with_retry_after(self):
+        original = server.RATE_LIMIT_PER_MINUTE
+        server.RATE_BUCKETS.clear()
+        server.RATE_LIMIT_PER_MINUTE = 3
+        try:
+            blocked = None
+            for _ in range(6):
+                blocked = await self.client.get("/api/session")
+                if blocked.status == 429:
+                    break
+            self.assertIsNotNone(blocked)
+            self.assertEqual(blocked.status, 429)
+            self.assertIsNotNone(blocked.headers.get("Retry-After"))
+            payload = await blocked.json()
+            self.assertFalse(payload["ok"])
+            self.assertIn("Too many requests", payload["error"])
+        finally:
+            server.RATE_LIMIT_PER_MINUTE = original
+            server.RATE_BUCKETS.clear()
+
+    async def test_rate_limit_zero_disables_throttling(self):
+        original = server.RATE_LIMIT_PER_MINUTE
+        server.RATE_BUCKETS.clear()
+        server.RATE_LIMIT_PER_MINUTE = 0
+        try:
+            for _ in range(10):
+                response = await self.client.get("/api/session")
+                self.assertEqual(response.status, 200)
+        finally:
+            server.RATE_LIMIT_PER_MINUTE = original
+            server.RATE_BUCKETS.clear()
+
+
+class HealthTests(ApiTestCase):
+    async def test_health_reports_writable_checks(self):
+        response = await self.client.get("/healthz")
+        self.assertEqual(response.status, 200)
+        payload = await response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["checks"]["home_writable"])
+        self.assertTrue(payload["checks"]["state_writable"])
+        self.assertEqual(payload["version"], server.APP_VERSION)
+        self.assertIsInstance(payload["uptime"], int)
+
+    async def test_health_degrades_to_503_when_home_is_missing(self):
+        original = server.HOME_ROOT
+        try:
+            server.HOME_ROOT = Path("/nonexistent-lumadesk-home-for-tests")
+            response = await self.client.get("/healthz")
+            self.assertEqual(response.status, 503)
+            payload = await response.json()
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["checks"]["home_writable"])
+        finally:
+            server.HOME_ROOT = original
+
+
+class MetricsTests(ApiTestCase):
+    async def test_metrics_requires_session_or_token(self):
+        anonymous = TestClient(TestServer(server.create_app()))
+        await anonymous.start_server()
+        try:
+            response = await anonymous.get("/metrics")
+            self.assertEqual(response.status, 401)
+        finally:
+            await anonymous.close()
+
+    async def test_metrics_exposes_prometheus_series_for_session_clients(self):
+        response = await self.client.get("/metrics")
+        self.assertEqual(response.status, 200)
+        self.assertIn("text/plain", response.headers.get("Content-Type", ""))
+        text = await response.text()
+        self.assertIn("lumadesk_http_requests_total", text)
+        self.assertIn(f'lumadesk_info{{version="{server.APP_VERSION}"', text)
+        self.assertIn("lumadesk_terminal_sessions_max", text)
+        self.assertIn("lumadesk_uptime_seconds", text)
+
+    async def test_metrics_bearer_token_grants_scrape_access(self):
+        original = server.METRICS_TOKEN
+        server.METRICS_TOKEN = "metrics-token-for-tests-1234"
+        anonymous = TestClient(TestServer(server.create_app()))
+        await anonymous.start_server()
+        try:
+            denied = await anonymous.get("/metrics")
+            self.assertEqual(denied.status, 401)
+            self.assertIn("Bearer", denied.headers.get("WWW-Authenticate", ""))
+            wrong = await anonymous.get(
+                "/metrics", headers={"Authorization": "Bearer wrong-token-00000000"}
+            )
+            self.assertEqual(wrong.status, 401)
+            allowed = await anonymous.get(
+                "/metrics", headers={"Authorization": f"Bearer {server.METRICS_TOKEN}"}
+            )
+            self.assertEqual(allowed.status, 200)
+            self.assertIn("lumadesk_uptime_seconds", await allowed.text())
+        finally:
+            await anonymous.close()
+            server.METRICS_TOKEN = original
+
+
+class TerminalSlotTests(ApiTestCase):
+    async def test_terminal_cap_returns_429_handshake(self):
+        if not shutil.which("bash"):
+            self.skipTest("bash is not installed")
+        original = server.MAX_TERMINALS
+        server.MAX_TERMINALS = 0
+        try:
+            with self.assertRaises(aiohttp.WSServerHandshakeError) as caught:
+                async with self.client.ws_connect("/ws/terminal"):
+                    pass
+            self.assertEqual(caught.exception.status, 429)
+        finally:
+            server.MAX_TERMINALS = original
+
+
 if __name__ == "__main__":
     unittest.main()

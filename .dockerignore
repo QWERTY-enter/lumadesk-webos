@@ -7,6 +7,7 @@ app/node_modules
 .demo-home
 .demo-state
 .railway-test
+backups
 *-preview.png
 *.zip
 README.assets

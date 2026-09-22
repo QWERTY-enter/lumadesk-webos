@@ -5,17 +5,20 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# Nine characters are accepted, a metrics token is copied into the bootstrap
+# file, and both secrets are removed from the child environment.
 run_entrypoint() {
   # Expansion is intentionally deferred to the child shell after entrypoint cleanup.
   # shellcheck disable=SC2016
   env \
     WEBOS_PASSWORD='Railway7$' \
     WEBOS_SECRET="${1:-}" \
+    WEBOS_METRICS_TOKEN='metrics-token-abc123' \
     WEBOS_STATE="$tmp/state" \
     WEBOS_CONFIG="$tmp/bootstrap.json" \
     WEBOS_RUNTIME=auto \
     "$root/scripts/entrypoint.sh" sh -c \
-      'test -z "${WEBOS_PASSWORD+x}" && test -z "${WEBOS_SECRET+x}"'
+      'test -z "${WEBOS_PASSWORD+x}" && test -z "${WEBOS_SECRET+x}" && test -z "${WEBOS_METRICS_TOKEN+x}"'
 }
 
 # A nine-character password is accepted and a strong secret is generated.
@@ -25,6 +28,7 @@ import json
 import sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 assert config["password"] == "Railway7$"
+assert config["metrics_token"] == "metrics-token-abc123"
 assert len(config["secret"]) >= 32
 print(config["secret"])
 PY
