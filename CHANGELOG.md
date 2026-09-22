@@ -27,7 +27,7 @@ All notable changes to LumaDesk OS are documented here. Versions follow Semantic
   `uptime`, returning `503` when the workspace or state directory is broken.
 - `scripts/backup.sh` for timestamped home/state volume archives plus the
   `.env` credentials file, with restore guidance in the README.
-- Compose `pids: 1024` limit and JSON-file log rotation (10 MB × 5) for both
+- Compose `pids_limit: 1024` and JSON-file log rotation (10 MB × 5) for both
   services.
 - CI: shell-syntax check for `backup.sh`, `docker compose config` validation
   for both profiles, and smoke assertions for health checks, request ids, and

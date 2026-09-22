@@ -36,7 +36,7 @@ services:
       - /tmp:mode=1777
     # Cap process creation so a fork bomb cannot exhaust the host; a normal
     # LumaDesk stack runs well under one hundred processes.
-    pids: 1024
+    pids_limit: 1024
     logging:
       driver: json-file
       options:
