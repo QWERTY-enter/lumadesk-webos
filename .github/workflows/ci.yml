@@ -47,17 +47,26 @@ jobs:
 
       - name: Validate Compose configuration
         run: |
-          WEBOS_PASSWORD='ci-compose-password' \
-          WEBOS_SECRET='ci-compose-secret-0123456789abcdef0123456789abcdef' \
-          WEBOS_DOMAIN=ci.example.com \
-          COMPOSE_PROFILES=public \
-          docker compose config -q
-          # Profiles never change interpolation, so WEBOS_DOMAIN must still exist
-          # when the gateway stays inactive.
-          WEBOS_PASSWORD='ci-compose-password' \
-          WEBOS_SECRET='ci-compose-secret-0123456789abcdef0123456789abcdef' \
-          WEBOS_DOMAIN=ci.example.com \
-          docker compose config -q
+          set -euo pipefail
+          export WEBOS_PASSWORD='ci-compose-password'
+          export WEBOS_SECRET='ci-compose-secret-0123456789abcdef0123456789abcdef'
+          export WEBOS_DOMAIN=ci.example.com
+          docker compose version
+          for mode in public default; do
+            if [ "$mode" = public ]; then
+              export COMPOSE_PROFILES=public
+            else
+              unset COMPOSE_PROFILES || true
+            fi
+            # Redirect instead of --quiet so no compose version flag quirk
+            # can fail a valid file; capture the error for the annotation.
+            if ! output=$(docker compose config 2>&1 >/dev/null); then
+              flat=${output//$'\n'/ | }
+              echo "::error title=Compose validation ($mode)::${flat}"
+              exit 1
+            fi
+            echo "compose config OK ($mode)"
+          done
 
   image:
     name: Build linux/amd64 image
